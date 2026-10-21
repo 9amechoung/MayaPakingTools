@@ -86,6 +86,69 @@ def check_islands_in_tiles(tiles):
     return densities
 
 
+def uv_coords(node):
+    coords = cmds.polyEditUV(node + ".map[*]", query=True)
+    return list(zip(coords[0::2], coords[1::2]))
+
+
+def max_uv_gap(a, b):
+    return max(abs(p[0] - q[0]) + abs(p[1] - q[1]) for p, q in zip(uv_coords(a), uv_coords(b)))
+
+
+def bbox_gap(a, b):
+    ba = packer.uv_bbox(a + ".map[*]")
+    bb = packer.uv_bbox(b + ".map[*]")
+    return max(abs(x - y) for x, y in zip(ba, bb))
+
+
+def test_align():
+    from uv_group_packer import align
+
+    cmds.file(new=True, force=True)
+    # An L-shaped island (no symmetry), copies with moved UVs, and an unrelated cube.
+    template = cmds.polyPlane(name="tpl", width=3, height=3, subdivisionsX=3, subdivisionsY=3)[0]
+    # Keep the bottom row plus one face above it: an L whose mirror image is
+    # not a rotation of itself.
+    cmds.delete(template + ".f[4:8]")
+    cmds.polyEditUV(template + ".map[*]", pivotU=0.5, pivotV=0.5, scaleU=0.4, scaleV=0.4)
+    cmds.polyCube(name="other")
+
+    def copy(name, angle, scale=1.0, flip=False, offset=(1.3, 0.2)):
+        node = cmds.duplicate(template, name=name)[0]
+        uvs = node + ".map[*]"
+        cmds.polyEditUV(uvs, pivotU=0.5, pivotV=0.5, scaleU=-scale if flip else scale, scaleV=scale)
+        cmds.polyEditUV(uvs, pivotU=0.5, pivotV=0.5, angle=angle)
+        cmds.polyEditUV(uvs, uValue=offset[0], vValue=offset[1], relative=True)
+        return node
+
+    print("align to unselected (vertex position):")
+    a = copy("rotA", 63)
+    b = copy("rotB", -140, offset=(2.1, 1.4))
+    cmds.select(a, b)
+    result = align.align_to_unselected(align.AlignOptions(mode=align.MODE_VERTEX, threshold=0.01))
+    check(result["aligned"] == 2, "both copies aligned: %s" % result)
+    check(max_uv_gap(a, template) < 1e-5 and max_uv_gap(b, template) < 1e-5,
+          "every UV sits exactly on the template")
+    cmds.undo()
+    check(max_uv_gap(a, template) > 0.1, "one undo reverts the align")
+    cmds.delete(a, b)
+
+    print("align to unselected (border shape):")
+    small = copy("small", 37, scale=0.6)
+    mirrored = copy("mirrored", 120, flip=True, offset=(-1.0, 0.4))
+    cube_before = uv_coords("other")
+    cmds.select(small, mirrored)
+    result = align.align_to_unselected(align.AlignOptions(threshold=0.1))
+    check(result["aligned"] == 0, "no match without Adjust Scale / Flipping: %s" % result)
+    result = align.align_to_unselected(align.AlignOptions(threshold=0.1, adjust_scale=True,
+                                                          allow_flip=True))
+    check(result["aligned"] == 2, "scaled and mirrored copies aligned: %s" % result)
+    check(bbox_gap(small, template) < 0.01 and bbox_gap(mirrored, template) < 0.01,
+          "aligned copies cover the template (bbox gaps %.4f, %.4f)"
+          % (bbox_gap(small, template), bbox_gap(mirrored, template)))
+    check(uv_coords("other") == cube_before, "unrelated island untouched")
+
+
 def main():
     # Undo is off by default in mayapy.
     cmds.undoInfo(state=True, infinity=True)
@@ -161,6 +224,8 @@ def main():
     cmds.undo()
     eye_bbox = packer.uv_bbox(cmds.polyListComponentConversion(uvgroups.group_faces("EYE"), toUV=True))
     check(eye_bbox[0] >= 1.0, "one undo restores the previous pack")
+
+    test_align()
 
     print("ALL PASSED")
 

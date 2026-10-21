@@ -7,9 +7,9 @@ UV를 그룹(재질/파츠)으로 나눠 그룹마다 **별도의 영역(Box)** 
 
 패킹 엔진은 마야 내장 Unfold3D(`u3dLayout`)를 사용하므로 별도 설치나 라이선스가 필요 없습니다.
 
-| Groups To Single Tile | Texture Atlas | Tile Range | Group Box + TD |
-|---|---|---|---|
-| ![single](docs/ui_single_tile.png) | ![atlas](docs/ui_atlas.png) | ![range](docs/ui_tile_range.png) | ![box](docs/ui_group_box.png) |
+| Groups To Single Tile | Texture Atlas | Tile Range | Group Box + TD | Aligning |
+|---|---|---|---|---|
+| ![single](docs/ui_single_tile.png) | ![atlas](docs/ui_atlas.png) | ![range](docs/ui_tile_range.png) | ![box](docs/ui_group_box.png) | ![align](docs/ui_aligning.png) |
 
 ## 기능
 
@@ -25,6 +25,10 @@ UV를 그룹(재질/파츠)으로 나눠 그룹마다 **별도의 영역(Box)** 
 - **Tile filling**: Simultaneously(모든 타일을 고르게) / Sequentially(앞 타일부터 채움).
 - **Group Box**: 그룹마다 직접 박스를 지정할 수 있습니다(UVPackmaster의 Group Target Box). 좌표 입력, From Layout, Set To Tile, NW~SE 버튼으로 옆 타일로 이동(아일랜드도 같이 이동 가능). 커스텀 박스는 점선으로 미리보기됩니다.
 - **Texel Density**: 선택의 평균 밀도 읽기(Get), 아일랜드마다 같은 밀도로 맞추기(Set Per-Island), 그룹별 밀도를 리스트에 표시(Show).
+- **Align To Unselected**: 선택한 아일랜드를 가장 비슷한 **선택 안 된 아일랜드(템플릿)** 위로 옮겨 겹칩니다(이동·회전, 옵션으로 뒤집기·크기 맞춤).
+  - Border Shape: 외곽선 모양으로 비교합니다. 토폴로지가 달라도 됩니다.
+  - Vertex Position: 토폴로지가 같은 아일랜드(복제한 메시 등)를 버텍스 단위로 맞춥니다. Correct Vertices를 켜면 모든 UV가 템플릿과 정확히 같은 위치로 갑니다.
+  - Threshold보다 다른 아일랜드는 건드리지 않고, 가장 가까웠던 차이를 상태줄에 알려줍니다.
 - **Weight**: 그룹별 가중치입니다. 그룹 모드에서는 박스가 커지고, 아일랜드 모드에서는 **텍셀 밀도 배수(Texel Density Tiers)** 로 쓰입니다(Weight 2 = 두 배 밀도).
 - **Lock**: 잠근 그룹은 움직이지 않습니다.
 - **Split shared shells**: 두 그룹에 걸친 UV 셸은 그룹 경계를 따라 자동으로 컷합니다.
@@ -37,7 +41,10 @@ UV를 그룹(재질/파츠)으로 나눠 그룹마다 **별도의 영역(Box)** 
    ```bash
    git clone https://github.com/9amechoung/MayaPakingTools.git
    ```
-2. `UVGroupPacker/install.py` 를 마야 뷰포트로 **드래그 앤 드롭**합니다.
+2. `UVGroupPacker/uv_group_packer_install.py` 를 마야 뷰포트로 **드래그 앤 드롭**합니다.
+   - 다른 툴의 `install.py` 와 이름이 겹치면 마야가 그 툴의 설치 파일을 대신 실행하기 때문에 고유한 이름을 씁니다.
+   - 업데이트할 때는 새 폴더의 이 파일을 다시 드롭하면 됩니다(재시작 불필요). 셸프 버튼도 누를 때마다 최신 코드를 불러옵니다.
+   - 예전 버전(`install.py`)을 쓰다가 다른 툴 설치 창이 떴다면 마야를 한 번 재시작한 뒤 드롭하세요.
 3. 현재 셸프에 **UVGP** 버튼이 생기고 창이 열립니다.
 
 수동으로 실행하려면 스크립트 에디터(Python)에서:
@@ -72,6 +79,13 @@ uv_group_packer.show()
 3. NW/N/NE/W/E/SW/S/SE 로 옆 타일로 옮깁니다. **Move islands with the box** 가 켜져 있으면 UV도 같이 옮겨집니다.
 4. 커스텀 박스가 있는 그룹은 어떤 그룹 모드에서든 그 박스 안에 패킹되고, 나머지 그룹은 자동 배치됩니다.
 
+### Align To Unselected
+
+1. 템플릿이 될 아일랜드는 그대로 두고, 맞출 아일랜드(또는 오브젝트)만 선택합니다.
+2. Aligning에서 Similarity mode를 고릅니다. 크기가 다르면 **Adjust scale**, 좌우가 뒤집혔으면 **Flipping enable** 을 켭니다.
+3. **Align To Unselected** 를 누릅니다. Ctrl+Z 한 번으로 되돌립니다.
+   - Threshold는 템플릿 크기 대비 허용 차이입니다(Border Shape 기본 0.1, Vertex Position 기본 0.01).
+
 ### 옵션
 
 | 옵션 | 설명 |
@@ -95,7 +109,9 @@ uv_group_packer.show()
 - 패킹 품질은 마야 `u3dLayout` 수준입니다(UVPackmaster의 GPU 휴리스틱 탐색은 없음).
 - 잠근(Lock) 그룹은 Single Tile 모드에서 공간을 예약하지 않습니다. 겹치지 않게 하려면 UDIM 모드와 함께 쓰는 것이 좋습니다.
 - 아일랜드별 밀도 값을 뷰포트에 숫자로 띄우는 기능(Show Is.TD)은 없고, 그룹별 밀도만 리스트에 표시합니다.
-- UVPackmaster의 Align To Unselected(유사 아일랜드 정렬), 스태킹, 셸 우선순위, 3D 방향 정렬 등은 아직 구현하지 않았습니다.
+- Vertex Position 모드는 UV 번호 순서가 같은 아일랜드(복제한 메시)를 짝지어 비교합니다. 토폴로지는 같아도 번호 순서가 다르면 Border Shape를 쓰세요.
+- Align To Unselected는 씬 전체의 선택 안 된 아일랜드를 템플릿 후보로 봅니다. 아일랜드가 아주 많으면 몇 초 걸릴 수 있습니다.
+- UVPackmaster의 Select Similar, Group By Similarity, 스태킹, 셸 우선순위, 3D 방향 정렬 등은 아직 구현하지 않았습니다.
 
 ## 테스트
 

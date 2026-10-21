@@ -57,6 +57,8 @@ def shells(faces, weight=1.0):
 
     Returns a list of dicts:
       faces, uvs   compact component strings for maya.cmds
+      node         mesh shape name used in those strings
+      face_ids, uv_ids, loops (per-face UV ids), coords ({uv id: (u, v)})
       area3d       world surface area
       area_uv      UV area
       bbox         (u_min, v_min, u_max, v_max)
@@ -79,16 +81,24 @@ def shells(faces, weight=1.0):
                 continue
             uv_ids = [it.getUVIndex(k) for k in range(it.polygonVertexCount())]
             data = islands.setdefault(shell_ids[uv_ids[0]],
-                                      {"faces": [], "uvs": set(), "area3d": 0.0, "area_uv": 0.0})
+                                      {"faces": [], "uvs": set(), "loops": [],
+                                       "area3d": 0.0, "area_uv": 0.0})
             data["faces"].append(face)
             data["uvs"].update(uv_ids)
+            data["loops"].append(uv_ids)
             data["area3d"] += it.getArea(om.MSpace.kWorld)
             data["area_uv"] += it.getUVArea()
         for data in islands.values():
-            iu = [us[i] for i in data["uvs"]]
-            iv = [vs[i] for i in data["uvs"]]
+            uv_ids = sorted(data["uvs"])
+            iu = [us[i] for i in uv_ids]
+            iv = [vs[i] for i in uv_ids]
             result.append({
                 "mesh": path,
+                "node": node,
+                "face_ids": data["faces"],
+                "uv_ids": uv_ids,
+                "loops": data["loops"],
+                "coords": dict(zip(uv_ids, zip(iu, iv))),
                 "faces": _components(node, "f", data["faces"]),
                 "uvs": _components(node, "map", data["uvs"]),
                 "area3d": data["area3d"],

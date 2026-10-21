@@ -10,6 +10,7 @@ except ImportError:  # Maya 2024 and older
     from shiboken2 import wrapInstance
 
 from . import __version__
+from . import align
 from . import groups as uvgroups
 from . import islands as uvislands
 from . import layout as uvlayout
@@ -142,6 +143,7 @@ class UVGroupPackerWindow(QtWidgets.QDialog):
         layout.addWidget(self._build_packing())
         layout.addWidget(self._build_group_box())
         layout.addWidget(self._build_texel_density())
+        layout.addWidget(self._build_aligning())
 
         self.preview = BoxPreview()
         layout.addWidget(self.preview)
@@ -390,6 +392,40 @@ class UVGroupPackerWindow(QtWidgets.QDialog):
         self.show_td = QtWidgets.QCheckBox("Show each group's density in the list")
         self.show_td.toggled.connect(self.refresh)
         form.addRow(self.show_td)
+        return box
+
+    def _build_aligning(self):
+        box = QtWidgets.QGroupBox("Aligning")
+        form = QtWidgets.QFormLayout(box)
+        self.align_mode = QtWidgets.QComboBox()
+        self.align_mode.addItem("Border Shape", align.MODE_BORDER)
+        self.align_mode.addItem("Vertex Position", align.MODE_VERTEX)
+        self.align_mode.setToolTip("Border Shape: compare outlines (any topology).\n"
+                                   "Vertex Position: same topology only, matched vertex by vertex.")
+        self.align_mode.currentIndexChanged.connect(self._on_align_mode_changed)
+        form.addRow("Similarity mode", self.align_mode)
+        self.align_threshold = QtWidgets.QDoubleSpinBox()
+        self.align_threshold.setRange(0.001, 1.0)
+        self.align_threshold.setDecimals(3)
+        self.align_threshold.setSingleStep(0.01)
+        self.align_threshold.setValue(0.1)
+        self.align_threshold.setToolTip("Largest accepted shape difference, relative to the "
+                                        "template's size")
+        form.addRow("Threshold", self.align_threshold)
+        self.align_flip = QtWidgets.QCheckBox("Flipping enable")
+        self.align_scale = QtWidgets.QCheckBox("Adjust scale")
+        self.align_correct = QtWidgets.QCheckBox("Correct vertices")
+        self.align_correct.setChecked(True)
+        self.align_correct.setToolTip("Vertex Position mode: snap every UV exactly onto the template")
+        checks = QtWidgets.QHBoxLayout()
+        for check in (self.align_flip, self.align_scale, self.align_correct):
+            checks.addWidget(check)
+        form.addRow(checks)
+        btn = QtWidgets.QPushButton("Align To Unselected")
+        btn.setToolTip("Move every selected island onto the most similar unselected island")
+        btn.clicked.connect(self._align_to_unselected)
+        form.addRow(btn)
+        self._on_align_mode_changed()
         return box
 
     def _add_row(self, key, label, widget):
@@ -643,6 +679,30 @@ class UVGroupPackerWindow(QtWidgets.QDialog):
             cmds.undoInfo(closeChunk=True)
         self._message("Set %d island(s) to %.2f px/unit." % (count, self.density.value()))
         self.refresh()
+
+    # ------------------------------------------------------------- aligning
+    def _on_align_mode_changed(self, *args):
+        vertex = self.align_mode.currentData() == align.MODE_VERTEX
+        self.align_correct.setEnabled(vertex)
+        # The two modes measure different things, so start from their own default.
+        self.align_threshold.setValue(0.01 if vertex else 0.1)
+
+    def _align_to_unselected(self):
+        if not uvgroups.selected_faces():
+            self._message("Select the islands to align first; unselected islands are the templates.")
+            return
+        options = align.AlignOptions(mode=self.align_mode.currentData(),
+                                     threshold=self.align_threshold.value(),
+                                     allow_flip=self.align_flip.isChecked(),
+                                     adjust_scale=self.align_scale.isChecked(),
+                                     correct_vertices=self.align_correct.isChecked())
+        result = align.align_to_unselected(options)
+        text = "Aligned %d island(s)." % result["aligned"]
+        if result["skipped"]:
+            errors = [e for e in result["errors"] if e is not None]
+            text += " %d had no similar unselected island" % result["skipped"]
+            text += " (closest %.3f, raise Threshold?)." % min(errors) if errors else "."
+        self._message(text)
 
     # ---------------------------------------------------------------- pack
     def _preview(self, *args):
