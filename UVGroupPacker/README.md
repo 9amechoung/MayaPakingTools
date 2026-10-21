@@ -11,7 +11,15 @@ UV를 그룹(재질/파츠)으로 나눠 그룹마다 **별도의 영역(Box)** 
 |---|---|---|---|---|---|
 | ![single](docs/ui_single_tile.png) | ![atlas](docs/ui_atlas.png) | ![range](docs/ui_tile_range.png) | ![box](docs/ui_group_box.png) | ![align](docs/ui_aligning.png) | ![options](docs/ui_packing_options.png) |
 
+패킹하는 동안 미리보기 창에서 그룹 색으로 칠한 아일랜드가 그룹별로 자리를 잡는 과정이 보입니다:
+
+![live](docs/live_packing.png)
+
 ## 기능
+
+- **그룹 색 보기**
+  - **Show islands in group colours** (기본 켜짐): 툴 창 미리보기에 실제 UV 아일랜드를 그룹 색으로 칠하고 그룹 이름을 표시합니다. 패킹 중에는 그룹(또는 타일)이 하나 끝날 때마다 다시 그려져서 진행 과정이 보입니다.
+  - **Group colours on the model**: 3D 뷰포트에서 모델 면을 그룹 색으로 칠합니다. 임시 컬러셋(`UVGP_groups`)에 칠하므로 원래 컬러셋은 그대로이고, 끄면 컬러셋과 그 때문에 생긴 히스토리 노드까지 지웁니다(그 사이 한 패킹 결과는 유지). 켜고 끄는 동작은 Undo 기록에 남지 않습니다.
 
 - **그룹 관리**: 선택한 면/오브젝트로 그룹 만들기, 할당, 제거, 선택, 삭제
   - 그룹은 씬 안에 `UVGP_<이름>` objectSet으로 저장됩니다. 파일을 저장하면 그룹도 같이 저장됩니다.
@@ -128,6 +136,7 @@ uv_group_packer.show()
 - Vertex Position 모드는 UV 번호 순서가 같은 아일랜드(복제한 메시)를 짝지어 비교합니다. 토폴로지는 같아도 번호 순서가 다르면 Border Shape를 쓰세요.
 - Align To Unselected는 씬 전체의 선택 안 된 아일랜드를 템플릿 후보로 봅니다. 아일랜드가 아주 많으면 몇 초 걸릴 수 있습니다.
 - UVPackmaster의 Group By Similarity(비슷한 것끼리 그룹 자동 생성)는 아직 없습니다.
+- 그룹 색 아일랜드와 그룹 이름은 툴 창 미리보기에 그립니다. 마야 UV 에디터 화면 위에 직접 칠하는 기능은 없습니다(파이썬에서 UV 에디터에 임의 색을 그릴 공식 방법이 없음).
 
 ## 테스트
 

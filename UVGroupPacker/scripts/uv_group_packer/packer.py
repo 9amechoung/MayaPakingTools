@@ -371,7 +371,7 @@ def _unit_area(island_list, unit, pad):
     return (u1 - u0 + pad) * (v1 - v0 + pad)
 
 
-def _pack_tiles(island_list, units, count, options):
+def _pack_tiles(island_list, units, count, options, progress=None):
     """Spread units over count tiles and pack each tile.
 
     Returns (tile boxes, bins of unit indices, scale u3dLayout applied per tile).
@@ -392,11 +392,16 @@ def _pack_tiles(island_list, units, count, options):
         _layout(island_list, [units[m] for m in members], box, options, pre_scale=0)
         after = _uv_area(faces)
         scales.append((after / before) ** 0.5 if before > 0 else 1.0)
+        if progress:
+            progress(len(scales), count, 1001 + int(box[0]) + 10 * int(box[1]))
     return tiles, bins, scales
 
 
-def pack_islands(options, island_list=None):
-    """Dynamic Tiles / Tile Range. Returns {UDIM number: box} for the used tiles."""
+def pack_islands(options, island_list=None, progress=None):
+    """Dynamic Tiles / Tile Range. Returns {UDIM number: box} for the used tiles.
+
+    progress(done, total, label) is called after every tile, e.g. to redraw a preview.
+    """
     _ensure_plugin()
     island_list = island_list if island_list is not None else island_targets()
     if not island_list:
@@ -414,7 +419,7 @@ def pack_islands(options, island_list=None):
             # Every try starts from the exact target density, so a tile that
             # had to shrink its islands shows up as a scale below 1.
             _set_unit_density(island_list, units, density, options.resolution)
-            tiles, bins, scales = _pack_tiles(island_list, units, count, options)
+            tiles, bins, scales = _pack_tiles(island_list, units, count, options, progress)
             used = [s for s in scales if s is not None]
             smallest = min(used) if used else 1.0
             # More tiles can't help once every unit has a tile to itself:
@@ -468,8 +473,11 @@ def _uniform_density(targets, boxes, resolution):
                             scaleU=factor, scaleV=factor)
 
 
-def pack_groups(options=None, names=None):
-    """Pack every unlocked group (or only the named ones). Returns {name: box}."""
+def pack_groups(options=None, names=None, progress=None):
+    """Pack every unlocked group (or only the named ones). Returns {name: box}.
+
+    progress(done, total, group name) is called after every group.
+    """
     options = options or PackOptions()
     _ensure_plugin()
 
@@ -486,11 +494,13 @@ def pack_groups(options=None, names=None):
         if options.split_shared_shells:
             split_shared_shells(all_groups)
         boxes = compute_group_boxes(targets, options)
-        for g in targets:
+        for index, g in enumerate(targets):
             box = boxes.get(g["name"])
             if box:
                 pack_group(g["faces"], box, options, padding_px=g.get("padding"),
                            rotate_step=g.get("rotation"))
+            if progress:
+                progress(index + 1, len(targets), g["name"])
         if options.td_policy == TD_UNIFORM:
             _uniform_density(targets, boxes, options.resolution)
         if options.pixel_perfect:
@@ -507,10 +517,10 @@ def pack_groups(options=None, names=None):
 
 
 # ---------------------------------------------------------------- search
-def _pack_once(options):
+def _pack_once(options, progress=None):
     if options.mode in ISLAND_MODES:
-        return pack_islands(options)
-    return pack_groups(options)
+        return pack_islands(options, progress=progress)
+    return pack_groups(options, progress=progress)
 
 
 def _coverage(options):
@@ -523,7 +533,7 @@ def _coverage(options):
     return _uv_area(faces)
 
 
-def search(options, report=None):
+def search(options, report=None, progress=None):
     """Heuristic search: try precision settings for up to options.search_time
     seconds, undo every try and finish with the best one.
 
@@ -549,12 +559,12 @@ def search(options, report=None):
         if report:
             report(len(tries), score)
     best = max(tries, key=lambda t: t[0])[1]
-    return _pack_once(best), [t[0] for t in tries]
+    return _pack_once(best, progress), [t[0] for t in tries]
 
 
-def pack(options=None):
+def pack(options=None, progress=None):
     """Pack with whatever mode the options ask for. Returns {label: box}."""
     options = options or PackOptions()
     if options.search_time > 0:
-        return search(options)[0]
-    return _pack_once(options)
+        return search(options, progress=progress)[0]
+    return _pack_once(options, progress)

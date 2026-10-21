@@ -11,6 +11,8 @@ except ImportError:  # Maya 2024 and older
 
 from . import __version__
 from . import align
+from . import align_math
+from . import display
 from . import groups as uvgroups
 from . import islands as uvislands
 from . import layout as uvlayout
@@ -48,14 +50,17 @@ def _swatch(rgb, size=14):
 
 
 class BoxPreview(QtWidgets.QWidget):
-    """Draws the computed group boxes (or the tiles of an island mode) over the UV tiles."""
+    """Draws the UV tiles, the islands in their group colours and the group boxes
+    (or the tiles of an island mode) on top, like UVPackmaster's UV overlay."""
 
     def __init__(self, parent=None):
         super(BoxPreview, self).__init__(parent)
-        self.setMinimumHeight(220)
+        self.setMinimumHeight(260)
         self._boxes = {}
         self._colors = {}
         self._custom = set()
+        # [(rgb, [face polygons], [border segments], bbox, label, label (u, v))]
+        self._islands = []
 
     def set_boxes(self, boxes, colors, custom=()):
         self._boxes = dict(boxes)
@@ -63,20 +68,25 @@ class BoxPreview(QtWidgets.QWidget):
         self._custom = set(custom)
         self.update()
 
+    def set_islands(self, islands):
+        self._islands = list(islands)
+        self.update()
+
     def paintEvent(self, event):
         painter = QtGui.QPainter(self)
         painter.setRenderHint(QtGui.QPainter.Antialiasing)
         painter.fillRect(self.rect(), QtGui.QColor(43, 43, 43))
-        if not self._boxes:
+        regions = list(self._boxes.values()) + [i[3] for i in self._islands]
+        if not regions:
             painter.setPen(QtGui.QColor(140, 140, 140))
             painter.drawText(self.rect(), QtCore.Qt.AlignCenter, "Preview Boxes to see the layout")
             return
 
-        # Whole tiles that contain boxes, so UDIM layouts show every tile.
-        u_min = min(int(b[0] // 1) for b in self._boxes.values())
-        v_min = min(int(b[1] // 1) for b in self._boxes.values())
-        u_max = max(int(-(-b[2] // 1)) for b in self._boxes.values())
-        v_max = max(int(-(-b[3] // 1)) for b in self._boxes.values())
+        # Whole tiles that contain boxes or islands, so UDIM layouts show every tile.
+        u_min = min(int(b[0] // 1) for b in regions)
+        v_min = min(int(b[1] // 1) for b in regions)
+        u_max = max(int(-(-b[2] // 1)) for b in regions)
+        v_max = max(int(-(-b[3] // 1)) for b in regions)
         tiles_u, tiles_v = max(1, u_max - u_min), max(1, v_max - v_min)
 
         margin = 8
@@ -97,6 +107,29 @@ class BoxPreview(QtWidgets.QWidget):
         font = painter.font()
         font.setPointSize(8)
         painter.setFont(font)
+
+        # Islands: faces filled with the group colour, outlined along the border.
+        for rgb, faces, borders, _, _, _ in self._islands:
+            color = _qcolor(rgb)
+            fill = QtGui.QColor(color)
+            fill.setAlpha(110)
+            painter.setPen(QtCore.Qt.NoPen)
+            painter.setBrush(fill)
+            for face in faces:
+                painter.drawPolygon(QtGui.QPolygonF([QtCore.QPointF(*to_px(u, v)) for u, v in face]))
+            painter.setPen(QtGui.QPen(color.lighter(130), 1))
+            for (ua, va), (ub, vb) in borders:
+                painter.drawLine(QtCore.QPointF(*to_px(ua, va)), QtCore.QPointF(*to_px(ub, vb)))
+        # Group names on their biggest island.
+        for rgb, _, _, _, label, at in self._islands:
+            if label:
+                x, y = to_px(*at)
+                painter.setPen(QtGui.QColor(0, 0, 0))
+                painter.drawText(QtCore.QPointF(x + 1, y + 1), label)
+                painter.setPen(_qcolor(rgb).lighter(160))
+                painter.drawText(QtCore.QPointF(x, y), label)
+
+        painter.setBrush(QtCore.Qt.NoBrush)
         for name, (u0, v0, u1, v1) in self._boxes.items():
             x0, y1 = to_px(u0, v0)
             x1, y0 = to_px(u1, v1)
@@ -123,6 +156,7 @@ class UVGroupPackerWindow(QtWidgets.QDialog):
         self.resize(400, 900)
         self._updating = False
         self._boxes = {}
+        self._group_signature = None
         self._build()
         self._on_mode_changed()
         self.refresh()
@@ -145,8 +179,23 @@ class UVGroupPackerWindow(QtWidgets.QDialog):
         layout.addWidget(self._build_texel_density())
         layout.addWidget(self._build_aligning())
 
+        # Outside the scroll area so the layout stays visible while packing.
         self.preview = BoxPreview()
-        layout.addWidget(self.preview)
+        outer.addWidget(self.preview)
+        view_row = QtWidgets.QHBoxLayout()
+        self.show_islands = QtWidgets.QCheckBox("Show islands in group colours")
+        self.show_islands.setChecked(True)
+        self.show_islands.setToolTip("Draw every group's UV islands in its colour, with its name")
+        self.show_islands.toggled.connect(self._update_islands)
+        self.show_colors = QtWidgets.QCheckBox("Group colours on the model")
+        self.show_colors.setChecked(display.is_shown())
+        self.show_colors.setToolTip("Paint each group's faces in its colour in the 3D viewport\n"
+                                    "(a temporary colour set; switching off removes it)")
+        self.show_colors.toggled.connect(self._toggle_colors)
+        view_row.addWidget(self.show_islands)
+        view_row.addWidget(self.show_colors)
+        view_row.addStretch(1)
+        outer.addLayout(view_row)
 
         buttons = QtWidgets.QHBoxLayout()
         preview_btn = QtWidgets.QPushButton("Preview Boxes")
@@ -598,7 +647,13 @@ class UVGroupPackerWindow(QtWidgets.QDialog):
         res = self.resolution.currentData()
         self._updating = True
         self.tree.clear()
-        for g in uvgroups.list_groups():
+        group_list = uvgroups.list_groups()
+        # Repaint the model only when membership or colours changed, not after a pack.
+        signature = [(g["name"], g["count"], tuple(g["color"])) for g in group_list]
+        if signature != self._group_signature and display.is_shown():
+            display.show()
+        self._group_signature = signature
+        for g in group_list:
             item = QtWidgets.QTreeWidgetItem()
             item.setIcon(COL_COLOR, _swatch(g["color"]))
             item.setText(COL_NAME, g["name"] + ("  [box]" if g["box"] else ""))
@@ -613,7 +668,50 @@ class UVGroupPackerWindow(QtWidgets.QDialog):
             item.setSelected(g["name"] in selected)
         self._updating = False
         self._load_box_fields()
+        self._update_islands()
         self._preview()
+
+    def _update_islands(self, *args):
+        """Re-read the islands drawn in the preview (each group's, in its colour)."""
+        if not self.show_islands.isChecked():
+            self.preview.set_islands([])
+            return
+        drawn = []
+        group_list = [g for g in uvgroups.list_groups() if g["faces"]]
+        sources = [(g["color"], g["name"], g["faces"]) for g in group_list]
+        if not sources and self.mode.currentData() in packer.ISLAND_MODES:
+            # No groups: show what the island modes would pack, in one colour.
+            faces = [f for i in packer.island_targets() for f in i["faces"]]
+            sources = [((1.0, 0.6, 0.2), None, faces)] if faces else []
+        for rgb, name, faces in sources:
+            island_list = uvislands.shells(faces)
+            biggest = max(island_list, key=lambda i: i["area_uv"]) if island_list else None
+            for island in island_list:
+                coords = island["coords"]
+                polys = [[coords[i] for i in loop] for loop in island["loops"]]
+                borders = [(coords[a], coords[b])
+                           for a, b in align_math.border_edges(island["loops"])]
+                labelled = name if island is biggest else None
+                bbox = island["bbox"]
+                at = ((bbox[0] + bbox[2]) * 0.5, (bbox[1] + bbox[3]) * 0.5)
+                drawn.append((rgb, polys, borders, bbox, labelled, at))
+        self.preview.set_islands(drawn)
+
+    def _toggle_colors(self, on):
+        if on:
+            count = display.show()
+            self._message("Group colours shown on %d group(s). Untick to remove them." % count
+                          if count else "Create groups first to see their colours.")
+        else:
+            display.hide()
+            self._message("Group colours removed from the model.")
+
+    def _on_progress(self, done, total, label):
+        """Called by the packer after every group/tile: redraw so the pack is seen live."""
+        self._message("Packing %s (%d/%d)..." % (label, done, total))
+        self._update_islands()
+        self.preview.repaint()
+        QtWidgets.QApplication.processEvents()
 
     def _refresh_density(self, *args):
         if self.show_td.isChecked():
@@ -625,6 +723,7 @@ class UVGroupPackerWindow(QtWidgets.QDialog):
         for key, (label, widget) in self._rows.items():
             label.setVisible(key in visible)
             widget.setVisible(key in visible)
+        self._update_islands()
         self._preview()
 
     def _on_item_double_clicked(self, item, column):
@@ -897,9 +996,9 @@ class UVGroupPackerWindow(QtWidgets.QDialog):
             if options.search_time > 0:
                 self._message("Heuristic search running (up to %d s)..." % options.search_time)
                 QtWidgets.QApplication.processEvents()
-                boxes, tries = packer.search(options)
+                boxes, tries = packer.search(options, progress=self._on_progress)
             else:
-                boxes = packer.pack(options)
+                boxes = packer.pack(options, progress=self._on_progress)
         except Exception as exc:
             self._message("Pack failed: %s" % exc)
             raise

@@ -280,6 +280,47 @@ def test_stacking():
           % max_uv_gap(turned, rect))
 
 
+def test_display():
+    from uv_group_packer import display
+
+    print("group colours on the model:")
+    build_scene()
+    cmds.select(clear=True)
+    uvgroups.groups_from_materials()
+    shapes = cmds.ls(type="mesh", noIntermediate=True, long=True)
+    history_before = {s: set(cmds.listHistory(s) or []) for s in shapes}
+    sets_before = {s: cmds.polyColorSet(s, query=True, allColorSets=True) for s in shapes}
+    display.show()
+    check(display.is_shown(), "colours recorded as shown")
+    eye = [g for g in uvgroups.list_groups() if g["name"] == "EYE"][0]
+    face = cmds.ls(eye["faces"], flatten=True)[0]
+    rgb = cmds.polyColorPerVertex(cmds.polyListComponentConversion(face, toVertexFace=True)[0],
+                                  query=True, rgb=True)
+    check(all(abs(a - b) < 1e-3 for a, b in zip(rgb, eye["color"])),
+          "EYE face painted in the EYE colour %s" % rgb)
+    check(cmds.getAttr(cmds.ls("head", dag=True, type="mesh")[0] + ".displayColors"),
+          "vertex colour display switched on")
+
+    calls = []
+    packer.pack_groups(packer.PackOptions(), progress=lambda *a: calls.append(a))
+    check([c[0] for c in calls] == [1, 2, 3, 4] and calls[-1][1] == 4,
+          "progress reported after every group: %s" % [c[2] for c in calls])
+    packed = packer.uv_bbox(cmds.polyListComponentConversion(eye["faces"], toUV=True))
+
+    display.hide()
+    check(not display.is_shown(), "colours recorded as hidden")
+    check(all(cmds.polyColorSet(s, query=True, allColorSets=True) == sets_before[s]
+              for s in shapes), "colour set removed from every mesh")
+    colour_types = ("createColorSet", "deleteColorSet", "polyColorPerVertex")
+    leftover = {s: sorted(n for n in set(cmds.listHistory(s) or []) - history_before[s]
+                          if cmds.nodeType(n) in colour_types)
+                for s in shapes}
+    check(not any(leftover.values()), "no display nodes left in history: %s"
+          % {k.split("|")[-1]: v for k, v in leftover.items() if v})
+    after = packer.uv_bbox(cmds.polyListComponentConversion(eye["faces"], toUV=True))
+    check(packed == after, "the pack made while colours were on is kept")
+
+
 def main():
     # Undo is off by default in mayapy.
     cmds.undoInfo(state=True, infinity=True)
@@ -359,6 +400,7 @@ def main():
     test_align()
     test_packing_extras()
     test_stacking()
+    test_display()
 
     print("ALL PASSED")
 
