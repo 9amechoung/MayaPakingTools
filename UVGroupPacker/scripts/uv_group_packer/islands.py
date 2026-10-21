@@ -147,3 +147,65 @@ def set_density(island_list, density, resolution, use_weight=True):
         target = density * (island["weight"] if use_weight else 1.0)
         scale_island(island, target / current)
     return len(island_list)
+
+
+def apply_match(uvs, m):
+    """Apply an align_math match (similarity transform) with undoable polyEditUV calls."""
+    cu, cv = m["src_c"]
+    s = m["scale"]
+    if m["flip"] or abs(s - 1.0) > 1e-9:
+        cmds.polyEditUV(uvs, pivotU=cu, pivotV=cv, scaleU=-s if m["flip"] else s, scaleV=s)
+    if abs(m["angle"]) > 1e-9:
+        cmds.polyEditUV(uvs, pivotU=cu, pivotV=cv, angle=m["angle"])
+    cmds.polyEditUV(uvs, uValue=m["dst_c"][0] - cu, vValue=m["dst_c"][1] - cv, relative=True)
+
+
+def overlap_shape(island):
+    """The island as a layout.shapes_overlap shape (bbox, points, triangles, border edges)."""
+    from . import align_math, layout
+    coords = island["coords"]
+    return {"bbox": island["bbox"], "points": list(coords.values()),
+            "tris": layout.fan_triangles(island["loops"], coords),
+            "edges": [(coords[a], coords[b]) for a, b in align_math.border_edges(island["loops"])]}
+
+
+def axis_direction(island, axis):
+    """UV direction in which world X/Y/Z (axis 0/1/2) grows across the island, or None.
+
+    Used by Match 3D Axis to keep stacked islands oriented the same way in 3D.
+    """
+    sel = om.MSelectionList()
+    sel.add(island["mesh"])
+    it = om.MItMeshPolygon(sel.getDagPath(0))
+    gx = gy = 0.0
+    for face in island["face_ids"]:
+        it.setIndex(face)
+        points = it.getPoints(om.MSpace.kWorld)
+        us, vs = it.getUVs()
+        for k in range(1, len(points) - 1):
+            du1, dv1 = us[k] - us[0], vs[k] - vs[0]
+            du2, dv2 = us[k + 1] - us[0], vs[k + 1] - vs[0]
+            det = du1 * dv2 - du2 * dv1
+            if abs(det) < 1e-14:
+                continue
+            d1 = points[k][axis] - points[0][axis]
+            d2 = points[k + 1][axis] - points[0][axis]
+            # Gradient of the world coordinate over UV, weighted by UV area.
+            weight = abs(det) / det
+            gx += (d1 * dv2 - d2 * dv1) * weight
+            gy += (du1 * d2 - du2 * d1) * weight
+    length = math.hypot(gx, gy)
+    return (gx / length, gy / length) if length > 1e-12 else None
+
+
+def tag_lookup(tag_faces):
+    """{tag: {mesh path: face ids}} from {tag: face components} (lock groups, priorities)."""
+    return {tag: {path: ids for path, (_, ids) in _faces_by_mesh(faces).items()}
+            for tag, faces in tag_faces.items()}
+
+
+def island_tag(island, lookup, default=None):
+    """The highest tag whose faces touch the island, or default."""
+    faces = set(island["face_ids"])
+    hits = [tag for tag, meshes in lookup.items() if faces & meshes.get(island["mesh"], set())]
+    return max(hits) if hits else default

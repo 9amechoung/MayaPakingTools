@@ -110,12 +110,31 @@ def _subsample(points, count):
     return [points[int(i * step)] for i in range(count)]
 
 
-def match_shapes(src, dst, allow_flip=False, adjust_scale=False, coarse_steps=72):
+def turn(vector, angle, flip=False):
+    """Rotate (and optionally mirror in U) a 2D direction."""
+    x, y = vector
+    if flip:
+        x = -x
+    a = math.radians(angle)
+    return (x * math.cos(a) - y * math.sin(a), x * math.sin(a) + y * math.cos(a))
+
+
+def _agreement(axis_src, axis_dst, angle, flip):
+    x, y = turn(axis_src, angle, flip)
+    return x * axis_dst[0] + y * axis_dst[1]
+
+
+def match_shapes(src, dst, allow_flip=False, adjust_scale=False, coarse_steps=72,
+                 axis_src=None, axis_dst=None):
     """Best similarity transform of point set src onto dst, without correspondence.
 
     Tries every rotation in coarse steps (and mirrored, if allowed), then
     refines the best angle. Without adjust_scale the size is kept, so islands
     of a different size end up with a large error.
+
+    axis_src / axis_dst: the UV direction a 3D axis runs along on each island.
+    When given, symmetric islands that fit equally well in several
+    orientations take the one that keeps the 3D axis consistent (Match 3D Axis).
     """
     src_c, dst_c = centroid(src), centroid(dst)
     dst_r = radius(dst, dst_c)
@@ -127,13 +146,17 @@ def match_shapes(src, dst, allow_flip=False, adjust_scale=False, coarse_steps=72
         m = {"scale": scale, "angle": angle, "flip": flip, "src_c": src_c, "dst_c": dst_c}
         return chamfer([apply(m, p) for p in points_src], points_dst)
 
-    best = None
+    tries = []
     for flip in ((False, True) if allow_flip else (False,)):
         for k in range(coarse_steps):
             angle = k * 360.0 / coarse_steps
-            e = error(coarse_src, coarse_dst, angle, flip)
-            if best is None or e < best[0]:
-                best = (e, angle, flip)
+            tries.append((error(coarse_src, coarse_dst, angle, flip), angle, flip))
+    best = min(tries)
+    if axis_src and axis_dst:
+        # Orientations about as good as the best one; keep the 3D axis aligned.
+        slack = best[0] * 0.25 + 1e-3 * dst_r
+        good = [t for t in tries if t[0] <= best[0] + slack]
+        best = max(good, key=lambda t: _agreement(axis_src, axis_dst, t[1], t[2]))
 
     _, angle, flip = best
     step = 360.0 / coarse_steps
@@ -144,6 +167,11 @@ def match_shapes(src, dst, allow_flip=False, adjust_scale=False, coarse_steps=72
     e = error(src, dst, angle, flip)
     return {"scale": scale, "angle": angle % 360.0, "flip": flip, "src_c": src_c,
             "dst_c": dst_c, "error": e / dst_r if dst_r > 0 else e}
+
+
+def topology_signature(loops):
+    """Face sizes in face order; equal for islands with the same topology."""
+    return tuple(len(loop) for loop in loops)
 
 
 def procrustes(src, dst, allow_flip=False, adjust_scale=False):

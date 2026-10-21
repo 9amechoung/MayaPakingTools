@@ -190,3 +190,118 @@ def atlas_boxes(names, cols, rows, cells_per_group=1, tile=(0.0, 0.0, 1.0, 1.0),
         boxes[name] = (u0 + half, v1 - height * cell_v + half,
                        u0 + width * cell_u - half, v1 - half)
     return boxes
+
+
+# ---------------------------------------------------------------- overlap
+# A "shape" here is {"bbox": (u0, v0, u1, v1), "points": [(u, v)...],
+# "tris": [((u, v), (u, v), (u, v))...], "edges": [((u, v), (u, v))...]}.
+def fan_triangles(loops, coords):
+    """Triangles of polygon loops (lists of UV ids), fanned from each first corner."""
+    tris = []
+    for loop in loops:
+        for k in range(1, len(loop) - 1):
+            tris.append((coords[loop[0]], coords[loop[k]], coords[loop[k + 1]]))
+    return tris
+
+
+def _side(p, a, b):
+    return (b[0] - a[0]) * (p[1] - a[1]) - (b[1] - a[1]) * (p[0] - a[0])
+
+
+def _in_triangle(p, tri, eps=1e-12):
+    a, b, c = tri
+    d1, d2, d3 = _side(p, a, b), _side(p, b, c), _side(p, c, a)
+    has_neg = d1 < -eps or d2 < -eps or d3 < -eps
+    has_pos = d1 > eps or d2 > eps or d3 > eps
+    return not (has_neg and has_pos)
+
+
+def _segments_cross(p1, p2, q1, q2):
+    d1, d2 = _side(q1, p1, p2), _side(q2, p1, p2)
+    d3, d4 = _side(p1, q1, q2), _side(p2, q1, q2)
+    return d1 * d2 < 0 and d3 * d4 < 0
+
+
+def _boxes_touch(a, b, eps=0.0):
+    return a[0] <= b[2] + eps and b[0] <= a[2] + eps and a[1] <= b[3] + eps and b[1] <= a[3] + eps
+
+
+def shapes_overlap(a, b, exact=False, tolerance=0.01):
+    """Do two UV islands overlap?
+
+    exact: only when they cover the same space (same bbox and area, within
+           tolerance of their size), i.e. islands stacked on top of each other.
+    otherwise: when any part overlaps.
+    """
+    if exact:
+        size = max(a["bbox"][2] - a["bbox"][0], a["bbox"][3] - a["bbox"][1],
+                   b["bbox"][2] - b["bbox"][0], b["bbox"][3] - b["bbox"][1], 1e-9)
+        return all(abs(x - y) <= tolerance * size for x, y in zip(a["bbox"], b["bbox"]))
+    if not _boxes_touch(a["bbox"], b["bbox"]):
+        return False
+    for first, second in ((a, b), (b, a)):
+        box = second["bbox"]
+        for p in first["points"]:
+            if box[0] <= p[0] <= box[2] and box[1] <= p[1] <= box[3]:
+                if any(_in_triangle(p, tri) for tri in second["tris"]):
+                    return True
+    # Crossing without any corner inside the other island (like a "+").
+    return any(_segments_cross(p1, p2, q1, q2) for p1, p2 in a["edges"] for q1, q2 in b["edges"])
+
+
+def overlapping_pairs(shapes, exact=False, tolerance=0.01):
+    """Index pairs of overlapping shapes, with a sweep over bbox U so it stays fast."""
+    order = sorted(range(len(shapes)), key=lambda i: shapes[i]["bbox"][0])
+    pairs = []
+    for pos, i in enumerate(order):
+        bi = shapes[i]["bbox"]
+        reach = bi[2] + tolerance * max(bi[2] - bi[0], bi[3] - bi[1])
+        for j in order[pos + 1:]:
+            if shapes[j]["bbox"][0] > reach:
+                break
+            if shapes_overlap(shapes[i], shapes[j], exact, tolerance):
+                pairs.append((i, j))
+    return pairs
+
+
+def clusters(count, pairs):
+    """Connected groups of indices (union-find); singletons included."""
+    parent = list(range(count))
+
+    def root(i):
+        while parent[i] != i:
+            parent[i] = parent[parent[i]]
+            i = parent[i]
+        return i
+
+    for i, j in pairs:
+        ri, rj = root(i), root(j)
+        if ri != rj:
+            parent[max(ri, rj)] = min(ri, rj)
+    groups = {}
+    for i in range(count):
+        groups.setdefault(root(i), []).append(i)
+    return sorted(groups.values())
+
+
+# ---------------------------------------------------------------- precision
+def pixel_snap_offset(bbox, resolution):
+    """Move that puts a bbox's lower-left corner on the texture's pixel grid."""
+    res = float(resolution)
+    return (round(bbox[0] * res) / res - bbox[0], round(bbox[1] * res) / res - bbox[1])
+
+
+# (u3dLayout resolution factor, mutations) per precision level: low .. max.
+# Measured: doubling the resolution costs ~3x the time and gains the most;
+# extra mutations cost ~2x for a smaller gain.
+PRECISION = ((0.5, 1), (1.0, 1), (2.0, 1), (2.0, 2))
+
+
+def search_candidates(precision):
+    """(precision level, mutations) a heuristic search tries, cheapest first."""
+    start = max(0, min(int(precision), len(PRECISION) - 1))
+    result = []
+    for level in range(start, len(PRECISION)):
+        base = PRECISION[level][1]
+        result += [(level, base), (level, base * 2)]
+    return result

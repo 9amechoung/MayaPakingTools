@@ -149,6 +149,137 @@ def test_align():
     check(uv_coords("other") == cube_before, "unrelated island untouched")
 
 
+def plane(name, u_scale=0.3, v_scale=0.3, offset=(0.0, 0.0)):
+    """A 2x2 plane whose UVs fill a small rectangle at offset."""
+    node = cmds.polyPlane(name=name, width=2, height=2, subdivisionsX=2, subdivisionsY=2)[0]
+    uvs = node + ".map[*]"
+    cmds.polyEditUV(uvs, pivotU=0, pivotV=0, scaleU=u_scale, scaleV=v_scale)
+    cmds.polyEditUV(uvs, uValue=offset[0], vValue=offset[1], relative=True)
+    return node
+
+
+def relative_error(nodes_before, nodes):
+    """How far the nodes' UVs are from a rigid (similarity) move of their old UVs."""
+    from uv_group_packer import align_math
+    before = [p for n in nodes for p in nodes_before[n]]
+    after = [p for n in nodes for p in uv_coords(n)]
+    return align_math.procrustes(before, after, allow_flip=True, adjust_scale=True)["error"]
+
+
+def test_packing_extras():
+    print("lock overlapping (exact):")
+    cmds.file(new=True, force=True)
+    a = plane("stackA", offset=(0.2, 0.2))
+    b = cmds.duplicate(a, name="stackB")[0]
+    plane("loose", offset=(0.25, 0.25))
+    cmds.select(clear=True)
+    options = packer.PackOptions(mode=packer.MODE_TILE_RANGE, tile_count=1, shell_padding_px=8)
+    packer.pack_islands(options.copy(lock_overlapping=packer.LOCK_EXACT))
+    check(max_uv_gap(a, b) < 1e-4, "identical stacked islands stay stacked")
+    check(bbox_gap(a, "loose") > 0.05, "a partly overlapping island is not locked in exact mode")
+    cmds.undo()
+    packer.pack_islands(options)
+    check(bbox_gap(a, b) > 0.05, "without locking the stack is pulled apart")
+    cmds.undo()
+
+    print("lock overlapping (any part):")
+    before = {n: uv_coords(n) for n in (a, b, "loose")}
+    packer.pack_islands(options.copy(lock_overlapping=packer.LOCK_ANY))
+    check(relative_error(before, [a, b, "loose"]) < 1e-4, "overlapping islands keep their layout")
+    cmds.undo()
+
+    print("lock groups:")
+    cmds.file(new=True, force=True)
+    left = plane("left", offset=(0.0, 0.0))
+    right = plane("right", offset=(0.5, 0.1))
+    plane("free", offset=(0.1, 0.6))
+    number = uvgroups.new_lock_group([left, right])
+    check(number == 1 and len(uvgroups.lock_groups()) == 1, "lock group created")
+    before = {n: uv_coords(n) for n in (left, right)}
+    cmds.select(clear=True)
+    packer.pack_islands(options)
+    check(relative_error(before, [left, right]) < 1e-4, "lock group keeps relative positions")
+    uvgroups.clear_lock_group([left, right])
+    check(not uvgroups.lock_groups(), "lock group cleared")
+
+    print("margins, pixel perfect:")
+    packer.pack_islands(options.copy(tile_margin_px=64, resolution=1024, pixel_perfect=True))
+    bbox = packer.uv_bbox(cmds.ls("*.map[*]"))
+    check(bbox[0] >= 64 / 1024.0 - 2e-3 and bbox[2] <= 1 - 64 / 1024.0 + 2e-3,
+          "tile margin keeps islands 64px from the border %s" % (tuple(round(x, 4) for x in bbox),))
+    for node in (left, right, "free"):
+        u0 = packer.uv_bbox(node + ".map[*]")[0] * 1024
+        check(abs(u0 - round(u0)) < 1e-3, "%s starts on a pixel (%.4f px)" % (node, u0))
+
+    print("groups from objects, overrides, uniform texel density:")
+    created = uvgroups.groups_from_objects()
+    check(sorted(created) == ["free", "left", "right"], "one group per object: %s" % created)
+    uvgroups.set_overrides("left", padding=16, rotation=0)
+    g = [x for x in uvgroups.list_groups() if x["name"] == "left"][0]
+    check(g["padding"] == 16 and g["rotation"] == 0, "per-group overrides stored")
+    cmds.scale(3, 3, 3, "free")  # bigger in 3D: independent boxes give it less density
+    uvgroups.set_weight("right", 2.0)
+    packer.pack_groups(packer.PackOptions(td_policy=packer.TD_UNIFORM))
+    dens = {x["name"]: uvislands.faces_density(x["faces"], 1024) / x["weight"]
+            for x in uvgroups.list_groups()}
+    check(max(dens.values()) / min(dens.values()) < 1.02,
+          "uniform texel density across groups (weight 2 counted): %s"
+          % {k: round(v, 1) for k, v in dens.items()})
+
+    print("heuristic search:")
+    result, tries = packer.search(packer.PackOptions(search_time=1.0, precision=1))
+    check(result and len(tries) > 1, "search tried %d settings: %s"
+          % (len(tries), [round(t, 4) for t in tries]))
+    covered = packer._coverage(packer.PackOptions())
+    check(covered >= max(tries) * 0.99, "final pack is as good as the best try")
+
+
+def test_stacking():
+    from uv_group_packer import align
+
+    print("stack with priority:")
+    cmds.file(new=True, force=True)
+    template = cmds.polyPlane(name="tpl", width=3, height=3, subdivisionsX=3, subdivisionsY=3)[0]
+    cmds.delete(template + ".f[4:8]")
+    cmds.polyEditUV(template + ".map[*]", pivotU=0.5, pivotV=0.5, scaleU=0.3, scaleV=0.3)
+    copies = []
+    for i, angle in enumerate((40, 150, 260)):
+        node = cmds.duplicate(template, name="copy%d" % i)[0]
+        cmds.polyEditUV(node + ".map[*]", pivotU=0.5, pivotV=0.5, angle=angle)
+        cmds.polyEditUV(node + ".map[*]", uValue=1.2 + i, vValue=0.3, relative=True)
+        copies.append(node)
+    cmds.polyCube(name="other")
+    uvgroups.set_priority(copies[1], 5)
+    target_before = uv_coords(copies[1])
+    cmds.select(copies + [template])
+    result = align.stack(align.AlignOptions(mode=align.MODE_TOPOLOGY, threshold=0.01))
+    check(result["stacks"] == 1 and result["moved"] == 3, "one stack of four: %s" % result)
+    check(uv_coords(copies[1]) == target_before, "the priority island stays put")
+    check(all(max_uv_gap(n, copies[1]) < 1e-5 for n in copies + [template]),
+          "everything stacked onto the priority island")
+    cmds.undo()
+
+    print("select similar:")
+    cmds.select(copies[0])
+    added = align.select_similar(align.AlignOptions(threshold=0.1))
+    selected = set(cmds.ls(cmds.ls(selection=True, objectsOnly=True), long=False))
+    check(added == 3, "three similar islands found (%d)" % added)
+    check("otherShape" not in selected and "other" not in selected, "the cube is not selected")
+
+    print("match 3D axis:")
+    cmds.file(new=True, force=True)
+    rect = cmds.polyPlane(name="rect", width=4, height=1, subdivisionsX=4, subdivisionsY=1)[0]
+    cmds.polyEditUV(rect + ".map[*]", pivotU=0, pivotV=0, scaleU=0.5, scaleV=0.125)
+    turned = cmds.duplicate(rect, name="turned")[0]
+    cmds.polyEditUV(turned + ".map[*]", pivotU=0.25, pivotV=0.0625, angle=180)
+    cmds.polyEditUV(turned + ".map[*]", uValue=1.5, vValue=0.5, relative=True)
+    cmds.select(turned)
+    align.align_to_unselected(align.AlignOptions(threshold=0.05, match_axis="x"))
+    check(max_uv_gap(turned, rect) < 1e-3,
+          "symmetric island lands in the orientation matching 3D X (gap %.5f)"
+          % max_uv_gap(turned, rect))
+
+
 def main():
     # Undo is off by default in mayapy.
     cmds.undoInfo(state=True, infinity=True)
@@ -226,6 +357,8 @@ def main():
     check(eye_bbox[0] >= 1.0, "one undo restores the previous pack")
 
     test_align()
+    test_packing_extras()
+    test_stacking()
 
     print("ALL PASSED")
 

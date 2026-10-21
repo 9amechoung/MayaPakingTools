@@ -82,8 +82,13 @@ def list_groups():
         box = None
         if cmds.getAttr(s + ".uvgpUseBox"):
             box = tuple(cmds.getAttr(s + "." + a) for a in BOX_ATTRS)
+        padding = cmds.getAttr(s + ".uvgpPadding")
+        rotation = cmds.getAttr(s + ".uvgpRotation")
         groups.append({
             "box": box,
+            # Per-group overrides of the global packing options (None = global).
+            "padding": padding if padding >= 0 else None,
+            "rotation": rotation if rotation >= 0 else None,
             "name": s[len(PREFIX):],
             "set": s,
             "color": tuple(cmds.getAttr(s + ".uvgpColor")[0]),
@@ -172,12 +177,22 @@ def set_locked(name, locked):
 
 
 def _ensure_box_attrs(set_name):
-    """Add the custom box attributes (missing on groups made by v0.1)."""
-    if cmds.attributeQuery("uvgpUseBox", node=set_name, exists=True):
-        return
-    cmds.addAttr(set_name, longName="uvgpUseBox", attributeType="bool", defaultValue=False)
-    for attr in BOX_ATTRS:
-        cmds.addAttr(set_name, longName=attr, attributeType="double", defaultValue=0.0)
+    """Add attributes newer than v0.1: custom box and per-group option overrides."""
+    if not cmds.attributeQuery("uvgpUseBox", node=set_name, exists=True):
+        cmds.addAttr(set_name, longName="uvgpUseBox", attributeType="bool", defaultValue=False)
+        for attr in BOX_ATTRS:
+            cmds.addAttr(set_name, longName=attr, attributeType="double", defaultValue=0.0)
+    if not cmds.attributeQuery("uvgpPadding", node=set_name, exists=True):
+        cmds.addAttr(set_name, longName="uvgpPadding", attributeType="double", defaultValue=-1.0)
+        cmds.addAttr(set_name, longName="uvgpRotation", attributeType="long", defaultValue=-1)
+
+
+def set_overrides(name, padding=None, rotation=None):
+    """Per-group shell padding (px) and rotation step (90/45/0); None uses the global option."""
+    set_name = _set_name(name)
+    _ensure_box_attrs(set_name)
+    cmds.setAttr(set_name + ".uvgpPadding", -1.0 if padding is None else float(padding))
+    cmds.setAttr(set_name + ".uvgpRotation", -1 if rotation is None else int(rotation))
 
 
 def set_box(name, box):
@@ -248,3 +263,94 @@ def _material_color(material):
                     return None
                 return value[0]
     return None
+
+
+def groups_from_objects(items=None):
+    """Create one group per mesh object, using the selection or every mesh in the scene."""
+    items = items or cmds.ls(selection=True) or cmds.ls(type="mesh", noIntermediate=True)
+    created = []
+    for shape in sorted(_meshes_from(items)):
+        transform = (cmds.listRelatives(shape, parent=True, fullPath=True) or [shape])[0]
+        name = transform.split("|")[-1]
+        created.append(create_group(name, faces=[transform]))
+    return created
+
+
+# ---------------------------------------------------------------- face tags
+# Lock groups and align priorities are plain objectSets of faces, numbered and
+# kept under their own root set. A face carries at most one tag of each kind.
+LOCK_ROOT = "UVGP_lockGroups"
+LOCK_PREFIX = "UVGPLock_"
+PRIORITY_ROOT = "UVGP_priorities"
+PRIORITY_PREFIX = "UVGPPrio_"
+
+
+def _tag_sets(root, prefix):
+    """{number: set name} of a tag kind."""
+    if not cmds.objExists(root):
+        return {}
+    result = {}
+    for s in cmds.sets(root, query=True) or []:
+        if s.startswith(prefix) and s[len(prefix):].isdigit():
+            result[int(s[len(prefix):])] = s
+    return result
+
+
+def _tag_faces(root, prefix):
+    return {n: cmds.sets(s, query=True) or [] for n, s in _tag_sets(root, prefix).items()}
+
+
+def _untag(root, prefix, faces):
+    for s in _tag_sets(root, prefix).values():
+        if cmds.sets(s, query=True):
+            cmds.sets(faces, remove=s)
+        if not cmds.sets(s, query=True):
+            cmds.delete(s)
+
+
+def _tag(root, prefix, number, faces):
+    _untag(root, prefix, faces)
+    if not cmds.objExists(root):
+        cmds.sets(name=root, empty=True)
+    set_name = prefix + str(number)
+    if not cmds.objExists(set_name):
+        set_name = cmds.sets(name=set_name, empty=True)
+        cmds.sets(set_name, addElement=root)
+    cmds.sets(faces, addElement=set_name)
+
+
+def lock_groups():
+    """{lock group number: faces}. Islands in one lock group keep their relative positions."""
+    return _tag_faces(LOCK_ROOT, LOCK_PREFIX)
+
+
+def new_lock_group(items):
+    """Put the selected faces' islands in a new lock group; returns its number (0 = nothing)."""
+    faces = to_faces(items)
+    if not faces:
+        return 0
+    number = max(list(_tag_sets(LOCK_ROOT, LOCK_PREFIX)) or [0]) + 1
+    _tag(LOCK_ROOT, LOCK_PREFIX, number, faces)
+    return number
+
+
+def clear_lock_group(items):
+    faces = to_faces(items)
+    if faces:
+        _untag(LOCK_ROOT, LOCK_PREFIX, faces)
+
+
+def priorities():
+    """{priority: faces}. When stacking, islands go onto the highest-priority similar island."""
+    return _tag_faces(PRIORITY_ROOT, PRIORITY_PREFIX)
+
+
+def set_priority(items, value):
+    """Give faces an align priority (0 clears it)."""
+    faces = to_faces(items)
+    if not faces:
+        return
+    if int(value) > 0:
+        _tag(PRIORITY_ROOT, PRIORITY_PREFIX, int(value), faces)
+    else:
+        _untag(PRIORITY_ROOT, PRIORITY_PREFIX, faces)

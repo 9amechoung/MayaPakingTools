@@ -22,9 +22,9 @@ COL_COLOR, COL_NAME, COL_FACES, COL_WEIGHT, COL_LOCK, COL_TD = range(6)
 
 # Option rows shown per mode; rows not listed for a mode are hidden.
 MODE_ROWS = {
-    packer.MODE_SINGLE_TILE: ("gap", "area", "tile"),
-    packer.MODE_TILES: ("gap", "tile", "per_row"),
-    packer.MODE_ATLAS: ("gap", "tile", "atlas", "cells"),
+    packer.MODE_SINGLE_TILE: ("gap", "area", "tile", "td"),
+    packer.MODE_TILES: ("gap", "tile", "per_row", "td"),
+    packer.MODE_ATLAS: ("gap", "tile", "atlas", "cells", "td"),
     packer.MODE_DYNAMIC: ("tile", "per_row", "fill"),
     packer.MODE_TILE_RANGE: ("tile", "per_row", "count", "fill"),
 }
@@ -193,6 +193,8 @@ class UVGroupPackerWindow(QtWidgets.QDialog):
                 (row1, "New", self._new_group, "Create a group from the selected faces/objects"),
                 (row1, "Assign", self._assign, "Move the selected faces into the highlighted group"),
                 (row1, "Remove", self._remove, "Remove the selected faces from every group"),
+                (row1, "From Objects", self._from_objects,
+                 "One group per mesh object, for the selection or the whole scene"),
                 (row2, "Select", self._select, "Select the faces of the highlighted groups"),
                 (row2, "Delete", self._delete, "Delete the highlighted groups (faces stay untouched)"),
                 (row2, "From Materials", self._from_materials,
@@ -236,7 +238,15 @@ class UVGroupPackerWindow(QtWidgets.QDialog):
         self.padding.setRange(0, 128)
         self.padding.setValue(4)
         self.padding.setSuffix(" px")
+        self.padding.setToolTip("Space between islands, in texture pixels")
         form.addRow("Shell padding", self.padding)
+
+        self.margin = QtWidgets.QDoubleSpinBox()
+        self.margin.setRange(0, 256)
+        self.margin.setValue(4)
+        self.margin.setSuffix(" px")
+        self.margin.setToolTip("Space between islands and the box/tile border, in texture pixels")
+        form.addRow("Tile margin", self.margin)
 
         self.gap = QtWidgets.QDoubleSpinBox()
         self.gap.setRange(0, 256)
@@ -250,6 +260,23 @@ class UVGroupPackerWindow(QtWidgets.QDialog):
         self.rotation.addItem("45°", 45)
         self.rotation.addItem("None", 0)
         form.addRow("Rotation step", self.rotation)
+
+        self.precision = QtWidgets.QComboBox()
+        for index, label in enumerate(("Low (fast)", "Normal", "High", "Max (slow)")):
+            self.precision.addItem(label, index)
+        self.precision.setCurrentIndex(1)
+        self.precision.setToolTip("Higher precision places islands more tightly but takes longer")
+        form.addRow("Precision", self.precision)
+
+        self.search_time = QtWidgets.QDoubleSpinBox()
+        self.search_time.setRange(0, 600)
+        self.search_time.setDecimals(0)
+        self.search_time.setSuffix(" s")
+        self.search_time.setSpecialValueText("off")
+        self.search_time.setToolTip(
+            "Heuristic search: keep trying higher precision settings for up to this many\n"
+            "seconds and keep the tightest pack. Each try is undone, so undo must be on.")
+        form.addRow("Heuristic search", self.search_time)
 
         self.area = QtWidgets.QComboBox()
         self.area.addItem("3D surface area", packer.AREA_3D)
@@ -315,6 +342,37 @@ class UVGroupPackerWindow(QtWidgets.QDialog):
         self.split.setChecked(True)
         self.split.setToolTip("Cuts UV seams along group borders before packing")
         form.addRow(self.split)
+
+        self.td_policy = QtWidgets.QComboBox()
+        self.td_policy.addItem("Independent", packer.TD_INDEPENDENT)
+        self.td_policy.addItem("Uniform", packer.TD_UNIFORM)
+        self.td_policy.setToolTip("Independent: every group fills its box.\n"
+                                  "Uniform: all groups share one texel density (times their weight).")
+        self._add_row("td", "Texel density", self.td_policy)
+
+        self.pixel_perfect = QtWidgets.QCheckBox("Pixel perfect: snap islands to the pixel grid")
+        form.addRow(self.pixel_perfect)
+
+        self.lock_overlap = QtWidgets.QComboBox()
+        self.lock_overlap.addItem("Off", packer.LOCK_OFF)
+        self.lock_overlap.addItem("Any part", packer.LOCK_ANY)
+        self.lock_overlap.addItem("Exact (stacked)", packer.LOCK_EXACT)
+        self.lock_overlap.setToolTip("Overlapping islands are packed as one piece.\n"
+                                     "Any part: when they overlap at all.\n"
+                                     "Exact: only islands stacked on the same spot.")
+        form.addRow("Lock overlapping", self.lock_overlap)
+
+        lock_row = QtWidgets.QHBoxLayout()
+        for label, slot, tip in (
+                ("New Lock Group", self._new_lock_group,
+                 "The selected islands keep their relative positions while packing"),
+                ("Clear Lock Group", self._clear_lock_group,
+                 "Take the selected islands out of their lock group")):
+            btn = QtWidgets.QPushButton(label)
+            btn.setToolTip(tip)
+            btn.clicked.connect(slot)
+            lock_row.addWidget(btn)
+        form.addRow(lock_row)
         return pack_box
 
     def _build_group_box(self):
@@ -366,6 +424,24 @@ class UVGroupPackerWindow(QtWidgets.QDialog):
         move_row.addWidget(self.move_islands)
         move_row.addStretch(1)
         vl.addLayout(move_row)
+
+        overrides = QtWidgets.QHBoxLayout()
+        self.group_padding = QtWidgets.QDoubleSpinBox()
+        self.group_padding.setRange(-1, 128)
+        self.group_padding.setSuffix(" px")
+        self.group_padding.setSpecialValueText("global")
+        self.group_padding.setToolTip("Shell padding for this group only (-1 = global option)")
+        self.group_padding.editingFinished.connect(self._on_overrides_edited)
+        self.group_rotation = QtWidgets.QComboBox()
+        for label, value in (("global", None), ("90°", 90), ("45°", 45), ("None", 0)):
+            self.group_rotation.addItem(label, value)
+        self.group_rotation.setToolTip("Rotation step for this group only")
+        self.group_rotation.currentIndexChanged.connect(self._on_overrides_edited)
+        overrides.addWidget(QtWidgets.QLabel("Padding"))
+        overrides.addWidget(self.group_padding, 1)
+        overrides.addWidget(QtWidgets.QLabel("Rotation"))
+        overrides.addWidget(self.group_rotation, 1)
+        vl.addLayout(overrides)
         return box
 
     def _build_texel_density(self):
@@ -395,13 +471,15 @@ class UVGroupPackerWindow(QtWidgets.QDialog):
         return box
 
     def _build_aligning(self):
-        box = QtWidgets.QGroupBox("Aligning")
+        box = QtWidgets.QGroupBox("Stacking / Aligning")
         form = QtWidgets.QFormLayout(box)
         self.align_mode = QtWidgets.QComboBox()
         self.align_mode.addItem("Border Shape", align.MODE_BORDER)
         self.align_mode.addItem("Vertex Position", align.MODE_VERTEX)
+        self.align_mode.addItem("Topology", align.MODE_TOPOLOGY)
         self.align_mode.setToolTip("Border Shape: compare outlines (any topology).\n"
-                                   "Vertex Position: same topology only, matched vertex by vertex.")
+                                   "Vertex Position: same UV count, matched vertex by vertex.\n"
+                                   "Topology: like Vertex Position, and the faces must match too.")
         self.align_mode.currentIndexChanged.connect(self._on_align_mode_changed)
         form.addRow("Similarity mode", self.align_mode)
         self.align_threshold = QtWidgets.QDoubleSpinBox()
@@ -421,10 +499,41 @@ class UVGroupPackerWindow(QtWidgets.QDialog):
         for check in (self.align_flip, self.align_scale, self.align_correct):
             checks.addWidget(check)
         form.addRow(checks)
-        btn = QtWidgets.QPushButton("Align To Unselected")
-        btn.setToolTip("Move every selected island onto the most similar unselected island")
-        btn.clicked.connect(self._align_to_unselected)
-        form.addRow(btn)
+
+        self.align_axis = QtWidgets.QComboBox()
+        self.align_axis.addItem("None", None)
+        for axis in ("x", "y", "z"):
+            self.align_axis.addItem(axis.upper(), axis)
+        self.align_axis.setToolTip("Match 3D Axis: symmetric islands that fit in several\n"
+                                   "orientations keep this world axis pointing the same way")
+        form.addRow("Match 3D axis", self.align_axis)
+
+        prio_row = QtWidgets.QHBoxLayout()
+        self.priority = QtWidgets.QSpinBox()
+        self.priority.setRange(0, 999)
+        self.priority.setValue(1)
+        self.priority.setToolTip("Similar islands are stacked onto the one with the highest "
+                                 "priority (0 clears it)")
+        set_prio = QtWidgets.QPushButton("Set Priority")
+        set_prio.setToolTip("Give the selected islands this align priority")
+        set_prio.clicked.connect(self._set_priority)
+        prio_row.addWidget(self.priority)
+        prio_row.addWidget(set_prio, 1)
+        form.addRow("Align priority", prio_row)
+
+        row = QtWidgets.QHBoxLayout()
+        for label, slot, tip in (
+                ("Stack", self._stack,
+                 "Put similar selected islands on top of each other"),
+                ("Align To Unselected", self._align_to_unselected,
+                 "Move every selected island onto the most similar unselected island"),
+                ("Select Similar", self._select_similar,
+                 "Add unselected islands similar to the selection to the selection")):
+            btn = QtWidgets.QPushButton(label)
+            btn.setToolTip(tip)
+            btn.clicked.connect(slot)
+            row.addWidget(btn)
+        form.addRow(row)
         self._on_align_mode_changed()
         return box
 
@@ -450,7 +559,21 @@ class UVGroupPackerWindow(QtWidgets.QDialog):
             atlas_cols=self.atlas_x.value(),
             atlas_rows=self.atlas_y.value(),
             cells_per_group=self.cells.value(),
-            split_shared_shells=self.split.isChecked())
+            split_shared_shells=self.split.isChecked(),
+            tile_margin_px=self.margin.value(),
+            precision=self.precision.currentData(),
+            pixel_perfect=self.pixel_perfect.isChecked(),
+            lock_overlapping=self.lock_overlap.currentData(),
+            search_time=self.search_time.value(),
+            td_policy=self.td_policy.currentData())
+
+    def align_options(self):
+        return align.AlignOptions(mode=self.align_mode.currentData(),
+                                  threshold=self.align_threshold.value(),
+                                  allow_flip=self.align_flip.isChecked(),
+                                  adjust_scale=self.align_scale.isChecked(),
+                                  correct_vertices=self.align_correct.isChecked(),
+                                  match_axis=self.align_axis.currentData())
 
     def _selected_names(self):
         return [item.data(COL_NAME, QtCore.Qt.UserRole) for item in self.tree.selectedItems()]
@@ -584,20 +707,47 @@ class UVGroupPackerWindow(QtWidgets.QDialog):
         self._message("Groups from materials: %s" % (", ".join(created) or "none found"))
         self.refresh()
 
+    def _from_objects(self):
+        created = uvgroups.groups_from_objects()
+        self._message("Groups from objects: %s" % (", ".join(created) or "no meshes found"))
+        self.refresh()
+
+    def _new_lock_group(self):
+        number = uvgroups.new_lock_group(cmds.ls(selection=True))
+        self._message("Lock group %d: these islands keep their relative positions." % number
+                      if number else "Select the islands to lock together first.")
+
+    def _clear_lock_group(self):
+        uvgroups.clear_lock_group(cmds.ls(selection=True))
+        self._message("Selected islands are no longer locked together.")
+
     # ------------------------------------------------------------ group box
     def _load_box_fields(self):
         names = self._selected_names()
         g = self._group(names[0]) if names else None
         box = (g["box"] if g else None) or self._boxes.get(names[0] if names else None)
-        widgets = [self.use_box] + self.box_spins
+        widgets = [self.use_box, self.group_padding, self.group_rotation] + self.box_spins
         for w in widgets:
             w.blockSignals(True)
         self.use_box.setChecked(bool(g and g["box"]))
         for spin, value in zip(self.box_spins, box or (0.0, 0.0, 1.0, 1.0)):
             spin.setValue(value)
+        padding = g["padding"] if g else None
+        self.group_padding.setValue(-1 if padding is None else padding)
+        rotation = g["rotation"] if g else None
+        self.group_rotation.setCurrentIndex(max(0, self.group_rotation.findData(rotation)))
         for w in widgets:
             w.blockSignals(False)
             w.setEnabled(g is not None)
+
+    def _on_overrides_edited(self, *args):
+        name = self._current_name()
+        if not name:
+            return
+        padding = self.group_padding.value()
+        uvgroups.set_overrides(name, padding=None if padding < 0 else padding,
+                               rotation=self.group_rotation.currentData())
+        self._message("Overrides for '%s' saved." % name)
 
     def _box_fields(self):
         return tuple(spin.value() for spin in self.box_spins)
@@ -682,21 +832,39 @@ class UVGroupPackerWindow(QtWidgets.QDialog):
 
     # ------------------------------------------------------------- aligning
     def _on_align_mode_changed(self, *args):
-        vertex = self.align_mode.currentData() == align.MODE_VERTEX
+        vertex = self.align_mode.currentData() in (align.MODE_VERTEX, align.MODE_TOPOLOGY)
         self.align_correct.setEnabled(vertex)
-        # The two modes measure different things, so start from their own default.
+        # Outlines and vertices measure different things, so start from their own default.
         self.align_threshold.setValue(0.01 if vertex else 0.1)
+
+    def _set_priority(self):
+        if not uvgroups.selected_faces():
+            self._message("Select the islands to give a priority first.")
+            return
+        uvgroups.set_priority(cmds.ls(selection=True), self.priority.value())
+        self._message("Align priority %d set." % self.priority.value() if self.priority.value()
+                      else "Align priority cleared.")
+
+    def _stack(self):
+        if not uvgroups.selected_faces():
+            self._message("Select the islands to stack first.")
+            return
+        result = align.stack(self.align_options())
+        self._message("Made %d stack(s) from %d island(s); %d had nothing similar."
+                      % (result["stacks"], result["moved"] + result["stacks"], result["single"]))
+
+    def _select_similar(self):
+        if not uvgroups.selected_faces():
+            self._message("Select one or more islands to compare with first.")
+            return
+        count = align.select_similar(self.align_options())
+        self._message("Selected %d similar island(s)." % count)
 
     def _align_to_unselected(self):
         if not uvgroups.selected_faces():
             self._message("Select the islands to align first; unselected islands are the templates.")
             return
-        options = align.AlignOptions(mode=self.align_mode.currentData(),
-                                     threshold=self.align_threshold.value(),
-                                     allow_flip=self.align_flip.isChecked(),
-                                     adjust_scale=self.align_scale.isChecked(),
-                                     correct_vertices=self.align_correct.isChecked())
-        result = align.align_to_unselected(options)
+        result = align.align_to_unselected(self.align_options())
         text = "Aligned %d island(s)." % result["aligned"]
         if result["skipped"]:
             errors = [e for e in result["errors"] if e is not None]
@@ -724,8 +892,14 @@ class UVGroupPackerWindow(QtWidgets.QDialog):
 
     def _pack(self):
         options = self.options()
+        tries = []
         try:
-            boxes = packer.pack(options)
+            if options.search_time > 0:
+                self._message("Heuristic search running (up to %d s)..." % options.search_time)
+                QtWidgets.QApplication.processEvents()
+                boxes, tries = packer.search(options)
+            else:
+                boxes = packer.pack(options)
         except Exception as exc:
             self._message("Pack failed: %s" % exc)
             raise
@@ -733,10 +907,12 @@ class UVGroupPackerWindow(QtWidgets.QDialog):
             self._message("Nothing to pack: create groups (or unlock them), or select islands.")
             return
         if options.mode in packer.ISLAND_MODES:
-            self._message("Packed into %d tile(s): %s. Ctrl+Z undoes the whole pack."
-                          % (len(boxes), ", ".join(str(t) for t in sorted(boxes))))
+            text = "Packed into %d tile(s): %s." % (len(boxes), ", ".join(str(t) for t in sorted(boxes)))
         else:
-            self._message("Packed %d group(s). Ctrl+Z undoes the whole pack." % len(boxes))
+            text = "Packed %d group(s)." % len(boxes)
+        if tries:
+            text += " Heuristic search tried %d setting(s) and kept the tightest." % len(tries)
+        self._message(text + " Ctrl+Z undoes the whole pack.")
         self.refresh()
 
 

@@ -81,6 +81,22 @@ class MatchShapesTest(unittest.TestCase):
         self.assertGreater(m["error"], 0.05)
 
 
+class MatchAxisTest(unittest.TestCase):
+    def test_axis_picks_orientation_of_symmetric_shape(self):
+        # A rectangle fits itself at 0 and 180 degrees; the 3D axis decides.
+        rect = outline([(0, 0), (4, 0), (4, 1), (0, 1)])
+        dst = moved(rect, 180)
+        up = (0.0, 1.0)
+        keep = align_math.match_shapes(rect, dst, axis_src=up, axis_dst=up)
+        self.assertLess(abs((keep["angle"] + 180) % 360 - 180), 1.0)
+        turned = align_math.match_shapes(rect, dst, axis_src=up, axis_dst=(0.0, -1.0))
+        self.assertAlmostEqual(turned["angle"], 180, delta=1.0)
+        self.assertLess(turned["error"], 0.01)
+
+    def test_topology_signature(self):
+        self.assertEqual(align_math.topology_signature([[0, 1, 2], [2, 3, 4, 5]]), (3, 4))
+
+
 class ProcrustesTest(unittest.TestCase):
     def test_exact_transform(self):
         src = [(0, 0), (3, 0), (3, 1), (1, 1), (1, 2), (0, 2)]

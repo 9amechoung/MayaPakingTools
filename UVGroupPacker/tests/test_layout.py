@@ -118,5 +118,53 @@ class AtlasTest(unittest.TestCase):
             self.assertAlmostEqual(b[3] - b[1], 0.5 - 0.02)
 
 
+def square_shape(u, v, size=1.0):
+    coords = {0: (u, v), 1: (u + size, v), 2: (u + size, v + size), 3: (u, v + size)}
+    loops = [[0, 1, 2, 3]]
+    return {"bbox": (u, v, u + size, v + size), "points": list(coords.values()),
+            "tris": layout.fan_triangles(loops, coords),
+            "edges": [(coords[i], coords[(i + 1) % 4]) for i in range(4)]}
+
+
+def bar_shape(u0, v0, u1, v1):
+    coords = {0: (u0, v0), 1: (u1, v0), 2: (u1, v1), 3: (u0, v1)}
+    return {"bbox": (u0, v0, u1, v1), "points": list(coords.values()),
+            "tris": layout.fan_triangles([[0, 1, 2, 3]], coords),
+            "edges": [(coords[i], coords[(i + 1) % 4]) for i in range(4)]}
+
+
+class OverlapTest(unittest.TestCase):
+    def test_any_part(self):
+        self.assertTrue(layout.shapes_overlap(square_shape(0, 0), square_shape(0.5, 0.5)))
+        self.assertFalse(layout.shapes_overlap(square_shape(0, 0), square_shape(1.2, 0)))
+
+    def test_plus_shape_crossing(self):
+        # No corner of either bar lies inside the other.
+        self.assertTrue(layout.shapes_overlap(bar_shape(0, 0.4, 1, 0.6), bar_shape(0.4, 0, 0.6, 1)))
+
+    def test_exact_needs_same_place(self):
+        self.assertTrue(layout.shapes_overlap(square_shape(0, 0), square_shape(0.001, 0), exact=True))
+        self.assertFalse(layout.shapes_overlap(square_shape(0, 0), square_shape(0.5, 0.5), exact=True))
+
+    def test_pairs_and_clusters(self):
+        shapes = [square_shape(0, 0), square_shape(0.5, 0), square_shape(5, 5), square_shape(1.2, 0)]
+        pairs = layout.overlapping_pairs(shapes)
+        self.assertEqual(sorted(pairs), [(0, 1), (1, 3)])
+        self.assertEqual(layout.clusters(4, pairs), [[0, 1, 3], [2]])
+
+
+class PrecisionTest(unittest.TestCase):
+    def test_pixel_snap(self):
+        du, dv = layout.pixel_snap_offset((0.10049, 0.5, 0.2, 0.6), 1000)
+        self.assertAlmostEqual(0.10049 + du, 0.100)
+        self.assertAlmostEqual(dv, 0.0)
+
+    def test_search_candidates_start_at_precision(self):
+        cands = layout.search_candidates(2)
+        self.assertEqual(cands[0], (2, layout.PRECISION[2][1]))
+        self.assertEqual(len(cands), len(set(cands)))
+        self.assertTrue(all(level >= 2 for level, _ in cands))
+
+
 if __name__ == "__main__":
     unittest.main()

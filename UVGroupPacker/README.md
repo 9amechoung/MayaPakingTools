@@ -7,9 +7,9 @@ UV를 그룹(재질/파츠)으로 나눠 그룹마다 **별도의 영역(Box)** 
 
 패킹 엔진은 마야 내장 Unfold3D(`u3dLayout`)를 사용하므로 별도 설치나 라이선스가 필요 없습니다.
 
-| Groups To Single Tile | Texture Atlas | Tile Range | Group Box + TD | Aligning |
-|---|---|---|---|---|
-| ![single](docs/ui_single_tile.png) | ![atlas](docs/ui_atlas.png) | ![range](docs/ui_tile_range.png) | ![box](docs/ui_group_box.png) | ![align](docs/ui_aligning.png) |
+| Groups To Single Tile | Texture Atlas | Tile Range | Group Box + TD | Aligning | Packing options |
+|---|---|---|---|---|---|
+| ![single](docs/ui_single_tile.png) | ![atlas](docs/ui_atlas.png) | ![range](docs/ui_tile_range.png) | ![box](docs/ui_group_box.png) | ![align](docs/ui_aligning.png) | ![options](docs/ui_packing_options.png) |
 
 ## 기능
 
@@ -17,6 +17,15 @@ UV를 그룹(재질/파츠)으로 나눠 그룹마다 **별도의 영역(Box)** 
   - 그룹은 씬 안에 `UVGP_<이름>` objectSet으로 저장됩니다. 파일을 저장하면 그룹도 같이 저장됩니다.
   - 한 면은 한 그룹에만 속합니다. 다른 그룹에 Assign하면 원래 그룹에서 자동으로 빠집니다.
 - **From Materials**: 재질마다 그룹을 하나씩 자동으로 만듭니다. 그룹 색도 재질 색을 따릅니다.
+- **From Objects**: 메시 오브젝트마다 그룹을 하나씩 만듭니다(선택이 있으면 선택한 오브젝트만).
+- **Shell padding / Tile margin**: 아일랜드 사이 간격과 박스·타일 테두리와의 간격을 따로 픽셀 단위로 정합니다.
+- **Precision**: Low ~ Max. 높을수록 촘촘하게 배치하지만 느립니다(해상도 2배마다 약 3배 시간).
+- **Heuristic search**: 정한 시간(초) 동안 더 높은 정밀도 설정들을 차례로 시도해 보고 가장 촘촘한 결과를 남깁니다. 시도는 매번 Undo로 되돌리므로 Undo가 켜져 있어야 합니다.
+- **Pixel perfect**: 패킹 후 아일랜드의 왼쪽 아래 모서리를 텍스처 픽셀 격자에 맞춥니다.
+- **Lock overlapping**: 겹친 아일랜드를 한 덩어리로 패킹합니다. Any part = 조금이라도 겹치면, Exact = 같은 자리에 정확히 겹친(스택된) 것만.
+- **Lock Group**: 선택한 아일랜드들을 묶어서, 겹치지 않아도 서로의 상대 위치를 유지한 채 패킹합니다(New / Clear Lock Group).
+- **Texel density (그룹 모드)**: Independent = 그룹마다 자기 박스를 꽉 채움, Uniform = 모든 그룹이 같은 텍셀 밀도(×Weight).
+- **그룹별 옵션 덮어쓰기**: Group Box 패널에서 그룹마다 Padding, Rotation을 따로 정할 수 있습니다.
 - **Groups To Single Tile**: 그룹별 3D 면적(또는 현재 UV 면적)에 비례해 타일을 박스로 나누고, 각 그룹을 자기 박스 안에만 패킹합니다.
 - **Groups To Tiles (UDIM)**: 그룹마다 UDIM 타일을 하나씩 배정합니다(Tiles in row 칸마다 다음 줄).
 - **Groups To Texture Atlas**: 타일을 X×Y 격자로 나누고 그룹마다 셀을 배정합니다(왼쪽 위부터). Cells per group으로 그룹당 셀 수를 정합니다.
@@ -28,7 +37,12 @@ UV를 그룹(재질/파츠)으로 나눠 그룹마다 **별도의 영역(Box)** 
 - **Align To Unselected**: 선택한 아일랜드를 가장 비슷한 **선택 안 된 아일랜드(템플릿)** 위로 옮겨 겹칩니다(이동·회전, 옵션으로 뒤집기·크기 맞춤).
   - Border Shape: 외곽선 모양으로 비교합니다. 토폴로지가 달라도 됩니다.
   - Vertex Position: 토폴로지가 같은 아일랜드(복제한 메시 등)를 버텍스 단위로 맞춥니다. Correct Vertices를 켜면 모든 UV가 템플릿과 정확히 같은 위치로 갑니다.
+  - Topology: Vertex Position에 더해 면 구조까지 같아야 맞춥니다.
   - Threshold보다 다른 아일랜드는 건드리지 않고, 가장 가까웠던 차이를 상태줄에 알려줍니다.
+- **Stack**: 선택한 아일랜드 중 비슷한 것끼리 하나 위에 겹칩니다. 기준은 **Align priority** 가 가장 높은 아일랜드(없으면 가장 큰 아일랜드)입니다.
+- **Select Similar**: 선택한 아일랜드와 비슷한 아일랜드를 씬에서 찾아 선택에 추가합니다.
+- **Match 3D axis**: 대칭이라 여러 방향으로 겹칠 수 있는 아일랜드를, 지정한 월드 축(X/Y/Z) 방향이 같아지는 쪽으로 겹칩니다.
+- **Align priority**: 아일랜드에 우선순위 숫자를 줍니다(0 = 해제). Stack과 Align To Unselected 모두 높은 쪽으로 모입니다.
 - **Weight**: 그룹별 가중치입니다. 그룹 모드에서는 박스가 커지고, 아일랜드 모드에서는 **텍셀 밀도 배수(Texel Density Tiers)** 로 쓰입니다(Weight 2 = 두 배 밀도).
 - **Lock**: 잠근 그룹은 움직이지 않습니다.
 - **Split shared shells**: 두 그룹에 걸친 UV 셸은 그룹 경계를 따라 자동으로 컷합니다.
@@ -106,12 +120,14 @@ uv_group_packer.show()
 ## 제한 사항 / 다음 버전 후보
 
 - 박스는 좌표 입력/버튼으로만 편집합니다. 미리보기에서 마우스로 그리거나 끌기는 아직 없습니다.
-- 패킹 품질은 마야 `u3dLayout` 수준입니다(UVPackmaster의 GPU 휴리스틱 탐색은 없음).
+- 패킹 품질은 마야 `u3dLayout` 수준입니다. Heuristic search는 u3dLayout 설정을 바꿔 가며 다시 돌리는 방식이라 UVPackmaster의 GPU 탐색만큼 빠르거나 촘촘하지는 않습니다.
+- Lock overlapping / Lock Group 덩어리는 바운딩 박스 크기로 자리를 잡으므로, ㄱ자처럼 빈 곳이 많은 덩어리는 공간을 조금 더 씁니다.
+- 한 그룹을 여러 박스에 나눠 담기, 정사각형이 아닌 텍스처(예: 2048×1024)는 아직 지원하지 않습니다.
 - 잠근(Lock) 그룹은 Single Tile 모드에서 공간을 예약하지 않습니다. 겹치지 않게 하려면 UDIM 모드와 함께 쓰는 것이 좋습니다.
 - 아일랜드별 밀도 값을 뷰포트에 숫자로 띄우는 기능(Show Is.TD)은 없고, 그룹별 밀도만 리스트에 표시합니다.
 - Vertex Position 모드는 UV 번호 순서가 같은 아일랜드(복제한 메시)를 짝지어 비교합니다. 토폴로지는 같아도 번호 순서가 다르면 Border Shape를 쓰세요.
 - Align To Unselected는 씬 전체의 선택 안 된 아일랜드를 템플릿 후보로 봅니다. 아일랜드가 아주 많으면 몇 초 걸릴 수 있습니다.
-- UVPackmaster의 Select Similar, Group By Similarity, 스태킹, 셸 우선순위, 3D 방향 정렬 등은 아직 구현하지 않았습니다.
+- UVPackmaster의 Group By Similarity(비슷한 것끼리 그룹 자동 생성)는 아직 없습니다.
 
 ## 테스트
 
