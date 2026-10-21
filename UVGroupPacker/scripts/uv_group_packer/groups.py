@@ -1,7 +1,8 @@
 """UV groups stored in the scene as Maya objectSets of faces.
 
 Each group is an objectSet named UVGP_<name> with extra attributes for its
-display colour, packing weight, order and lock state. All group sets live
+display colour, packing weight, order, lock state and an optional custom
+box (the region it always packs into, like UVPackmaster's group target boxes). All group sets live
 under the root set UVGP_groups so they are easy to find in the Outliner.
 A face belongs to at most one group: assigning faces to a group removes them
 from the others.
@@ -12,6 +13,7 @@ import maya.cmds as cmds
 
 ROOT_SET = "UVGP_groups"
 PREFIX = "UVGP_"
+BOX_ATTRS = ("uvgpBoxU0", "uvgpBoxV0", "uvgpBoxU1", "uvgpBoxV1")
 
 DEFAULT_COLORS = [
     (0.10, 0.20, 1.00),  # blue
@@ -68,7 +70,7 @@ def selected_faces():
 
 
 def list_groups():
-    """Return group dicts in creation order: name, set, color, weight, locked, faces."""
+    """Return group dicts in creation order: name, set, color, weight, locked, faces, box."""
     if not cmds.objExists(ROOT_SET):
         return []
     groups = []
@@ -76,7 +78,12 @@ def list_groups():
         if not s.startswith(PREFIX) or not cmds.attributeQuery("uvgpColor", node=s, exists=True):
             continue
         faces = cmds.sets(s, query=True) or []
+        _ensure_box_attrs(s)
+        box = None
+        if cmds.getAttr(s + ".uvgpUseBox"):
+            box = tuple(cmds.getAttr(s + "." + a) for a in BOX_ATTRS)
         groups.append({
+            "box": box,
             "name": s[len(PREFIX):],
             "set": s,
             "color": tuple(cmds.getAttr(s + ".uvgpColor")[0]),
@@ -108,6 +115,7 @@ def create_group(name, color=None, faces=None):
                      defaultValue=1.0, minValue=0.0)
         cmds.addAttr(set_name, longName="uvgpOrder", attributeType="long", defaultValue=order)
         cmds.addAttr(set_name, longName="uvgpLocked", attributeType="bool", defaultValue=False)
+        _ensure_box_attrs(set_name)
         cmds.setAttr(set_name + ".uvgpColor", *color, type="float3")
         cmds.sets(set_name, addElement=_ensure_root())
     if faces:
@@ -161,6 +169,27 @@ def set_weight(name, weight):
 
 def set_locked(name, locked):
     cmds.setAttr(_set_name(name) + ".uvgpLocked", bool(locked))
+
+
+def _ensure_box_attrs(set_name):
+    """Add the custom box attributes (missing on groups made by v0.1)."""
+    if cmds.attributeQuery("uvgpUseBox", node=set_name, exists=True):
+        return
+    cmds.addAttr(set_name, longName="uvgpUseBox", attributeType="bool", defaultValue=False)
+    for attr in BOX_ATTRS:
+        cmds.addAttr(set_name, longName=attr, attributeType="double", defaultValue=0.0)
+
+
+def set_box(name, box):
+    """Pin a group to a box (u_min, v_min, u_max, v_max), or None for automatic layout."""
+    set_name = _set_name(name)
+    _ensure_box_attrs(set_name)
+    if box:
+        u0, v0, u1, v1 = box
+        box = (min(u0, u1), min(v0, v1), max(u0, u1), max(v0, v1))
+        for attr, value in zip(BOX_ATTRS, box):
+            cmds.setAttr(set_name + "." + attr, float(value))
+    cmds.setAttr(set_name + ".uvgpUseBox", bool(box))
 
 
 def group_faces(name):

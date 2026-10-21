@@ -15,6 +15,7 @@ maya.standalone.initialize()
 import maya.cmds as cmds  # noqa: E402
 
 from uv_group_packer import groups as uvgroups  # noqa: E402
+from uv_group_packer import islands as uvislands  # noqa: E402
 from uv_group_packer import layout, packer  # noqa: E402
 
 
@@ -72,6 +73,19 @@ def pack_and_verify(options):
     return boxes
 
 
+def check_islands_in_tiles(tiles):
+    """Every island sits inside one of the tiles; returns each island's texel density."""
+    densities = []
+    for island in packer.island_targets():
+        bbox = packer.uv_bbox(island["uvs"])
+        if not any(layout.contains(box, bbox, eps=1e-3) for box in tiles.values()):
+            raise AssertionError("island %s outside the tiles: %s" % (island["faces"][0], bbox))
+        densities.append(uvislands.texel_density(island["area3d"], island["area_uv"], 1024)
+                         / island["weight"])
+    print("  ok  %d islands inside their tiles" % len(densities))
+    return densities
+
+
 def main():
     # Undo is off by default in mayapy.
     cmds.undoInfo(state=True, infinity=True)
@@ -95,6 +109,46 @@ def main():
     print("UDIM tiles:")
     boxes = pack_and_verify(packer.PackOptions(mode=packer.MODE_TILES, tile_u=1))
     check(all(b[0] >= 1.0 for b in boxes.values()), "tiles start at U=1, one per group")
+
+    print("texture atlas:")
+    boxes = pack_and_verify(packer.PackOptions(mode=packer.MODE_ATLAS, atlas_cols=2, atlas_rows=2))
+    check(all(abs((b[2] - b[0]) - 0.5) < 0.02 for b in boxes.values()), "atlas cells are 1/2 tile wide")
+
+    print("custom box:")
+    uvgroups.set_box("EYE", (2.0, 0.0, 2.5, 0.5))
+    check(uvgroups.list_groups()[1]["box"] == (2.0, 0.0, 2.5, 0.5), "custom box stored on the group")
+    boxes = pack_and_verify(packer.PackOptions(mode=packer.MODE_SINGLE_TILE))
+    check(boxes["EYE"] == (2.0, 0.0, 2.5, 0.5), "group with a custom box packs into it")
+    uvgroups.set_box("EYE", None)
+    check(uvgroups.list_groups()[1]["box"] is None, "custom box cleared")
+
+    print("tile range:")
+    cmds.select(clear=True)
+    island_list = packer.island_targets()
+    tiles = packer.pack_islands(packer.PackOptions(mode=packer.MODE_TILE_RANGE, tile_count=3,
+                                                   tiles_per_row=3, tile_u=1))
+    check(sorted(tiles) == [1002, 1003, 1004], "tile range fills tiles 1002-1004: %s" % sorted(tiles))
+    densities = check_islands_in_tiles(tiles)
+    check(max(densities) / min(densities) < 1.02,
+          "one texel density in every tile (%.1f..%.1f)" % (min(densities), max(densities)))
+
+    print("dynamic tiles:")
+    # The density tile range just reached in 3 tiles needs more than one tile.
+    density = min(densities)
+    tiles = packer.pack_islands(packer.PackOptions(mode=packer.MODE_DYNAMIC, texel_density=density,
+                                                   tiles_per_row=4))
+    check(1 < len(tiles) < 8, "dynamic tiles added tiles as needed: %s" % sorted(tiles))
+    densities = check_islands_in_tiles(tiles)
+    check(all(abs(d / density - 1.0) < 0.02 for d in densities),
+          "every island at the requested %.1f px/unit" % density)
+
+    print("texel density tiers:")
+    uvgroups.set_weight("LENS", 2.0)
+    tiles = packer.pack_islands(packer.PackOptions(mode=packer.MODE_TILE_RANGE, tile_count=2))
+    lens = uvislands.faces_density(uvgroups.group_faces("LENS"), 1024)
+    arr = uvislands.faces_density(uvgroups.group_faces("ARR"), 1024)
+    check(abs(lens / arr - 2.0) < 0.05, "weight 2 group gets 2x texel density (%.2f)" % (lens / arr))
+    uvgroups.set_weight("LENS", 1.0)
 
     print("lock:")
     uvgroups.set_locked("MASK", True)

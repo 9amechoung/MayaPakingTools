@@ -87,3 +87,106 @@ def fit_transform(src, dst):
 def contains(outer, inner, eps=1e-4):
     return (inner[0] >= outer[0] - eps and inner[1] >= outer[1] - eps and
             inner[2] <= outer[2] + eps and inner[3] <= outer[3] + eps)
+
+
+# ---------------------------------------------------------------- tiles
+# Offsets for moving a box to a neighbouring tile, named like a compass.
+DIRECTIONS = {
+    "NW": (-1, 1), "N": (0, 1), "NE": (1, 1),
+    "W": (-1, 0), "E": (1, 0),
+    "SW": (-1, -1), "S": (0, -1), "SE": (1, -1),
+}
+
+
+def move_box(box, direction):
+    """Shift box by one whole tile in a compass direction ('N', 'SE', ...)."""
+    du, dv = DIRECTIONS[direction]
+    return (box[0] + du, box[1] + dv, box[2] + du, box[3] + dv)
+
+
+def tile_boxes(count, start_u=0, start_v=0, per_row=10, margin=0.0):
+    """Boxes of count UDIM tiles, filled left to right then upwards."""
+    per_row = max(1, int(per_row))
+    boxes = []
+    for index in range(max(0, int(count))):
+        u = start_u + index % per_row
+        v = start_v + index // per_row
+        boxes.append((u + margin, v + margin, u + 1 - margin, v + 1 - margin))
+    return boxes
+
+
+FILL_SIMULTANEOUS = "simultaneous"
+FILL_SEQUENTIAL = "sequential"
+
+
+def distribute(items, count, method=FILL_SIMULTANEOUS, capacity=None):
+    """Split (key, area) items into count bins; returns a list of key lists.
+
+    simultaneous: every item goes to the currently lightest bin, so all tiles
+                  end up about equally full.
+    sequential:   fill the first bin up to capacity, then the next one, like
+                  pages of a book. Items that fit nowhere go to the lightest bin.
+    """
+    count = max(1, int(count))
+    bins = [[] for _ in range(count)]
+    sums = [0.0] * count
+    ordered = sorted(items, key=lambda it: (-it[1], str(it[0])))
+    if capacity is None:
+        capacity = sum(a for _, a in ordered) / count
+    for key, area in ordered:
+        index = None
+        if method == FILL_SEQUENTIAL:
+            index = next((i for i in range(count) if sums[i] + area <= capacity + 1e-12), None)
+        if index is None:
+            index = min(range(count), key=lambda i: sums[i])
+        bins[index].append(key)
+        sums[index] += area
+    return bins
+
+
+def tiles_needed(total_area, fill_ratio=0.7):
+    """How many unit tiles a set of islands with this UV area should need."""
+    if total_area <= 0:
+        return 1
+    count = total_area / max(fill_ratio, 1e-6)
+    return max(1, int(count) + (0 if count == int(count) else 1))
+
+
+# ---------------------------------------------------------------- atlas
+def atlas_boxes(names, cols, rows, cells_per_group=1, tile=(0.0, 0.0, 1.0, 1.0), gap=0.0):
+    """Give each group a block of cells in a cols x rows grid (a texture atlas).
+
+    Cells are taken from the top-left, row by row. A group that needs more
+    cells than a row has gets a block several rows high. Groups that no longer
+    fit in the grid are left out of the result.
+    Returns {name: box}.
+    """
+    cols, rows = max(1, int(cols)), max(1, int(rows))
+    cells = max(1, int(cells_per_group))
+    width = min(cells, cols)
+    height = -(-cells // cols)
+    used = [[False] * cols for _ in range(rows)]
+    cell_u = (tile[2] - tile[0]) / float(cols)
+    cell_v = (tile[3] - tile[1]) / float(rows)
+    half = gap * 0.5
+
+    def free(r, c):
+        if r + height > rows or c + width > cols:
+            return False
+        return all(not used[rr][cc] for rr in range(r, r + height) for cc in range(c, c + width))
+
+    boxes = {}
+    for name in names:
+        spot = next(((r, c) for r in range(rows) for c in range(cols) if free(r, c)), None)
+        if spot is None:
+            break
+        r, c = spot
+        for rr in range(r, r + height):
+            for cc in range(c, c + width):
+                used[rr][cc] = True
+        # Row 0 is the top of the tile.
+        u0 = tile[0] + c * cell_u
+        v1 = tile[3] - r * cell_v
+        boxes[name] = (u0 + half, v1 - height * cell_v + half,
+                       u0 + width * cell_u - half, v1 - half)
+    return boxes

@@ -11,11 +11,24 @@ except ImportError:  # Maya 2024 and older
 
 from . import __version__
 from . import groups as uvgroups
+from . import islands as uvislands
+from . import layout as uvlayout
 from . import packer
 
 WINDOW_OBJECT = "UVGroupPackerWindow"
 
-COL_COLOR, COL_NAME, COL_FACES, COL_WEIGHT, COL_LOCK = range(5)
+COL_COLOR, COL_NAME, COL_FACES, COL_WEIGHT, COL_LOCK, COL_TD = range(6)
+
+# Option rows shown per mode; rows not listed for a mode are hidden.
+MODE_ROWS = {
+    packer.MODE_SINGLE_TILE: ("gap", "area", "tile"),
+    packer.MODE_TILES: ("gap", "tile", "per_row"),
+    packer.MODE_ATLAS: ("gap", "tile", "atlas", "cells"),
+    packer.MODE_DYNAMIC: ("tile", "per_row", "fill"),
+    packer.MODE_TILE_RANGE: ("tile", "per_row", "count", "fill"),
+}
+
+COMPASS = (("NW", "N", "NE"), ("W", None, "E"), ("SW", "S", "SE"))
 
 
 def _maya_main_window():
@@ -34,17 +47,19 @@ def _swatch(rgb, size=14):
 
 
 class BoxPreview(QtWidgets.QWidget):
-    """Draws the computed group boxes over the UV tile(s)."""
+    """Draws the computed group boxes (or the tiles of an island mode) over the UV tiles."""
 
     def __init__(self, parent=None):
         super(BoxPreview, self).__init__(parent)
         self.setMinimumHeight(220)
         self._boxes = {}
         self._colors = {}
+        self._custom = set()
 
-    def set_boxes(self, boxes, colors):
+    def set_boxes(self, boxes, colors, custom=()):
         self._boxes = dict(boxes)
         self._colors = dict(colors)
+        self._custom = set(custom)
         self.update()
 
     def paintEvent(self, event):
@@ -85,14 +100,17 @@ class BoxPreview(QtWidgets.QWidget):
             x0, y1 = to_px(u0, v0)
             x1, y0 = to_px(u1, v1)
             rect = QtCore.QRectF(x0, y0, x1 - x0, y1 - y0)
-            color = _qcolor(self._colors.get(name, (1, 1, 1)))
+            color = _qcolor(self._colors.get(name, (0.9, 0.85, 0.1)))
             fill = QtGui.QColor(color)
             fill.setAlpha(50)
             painter.setBrush(fill)
-            painter.setPen(QtGui.QPen(color, 2))
+            pen = QtGui.QPen(color, 2)
+            if name in self._custom:
+                pen.setStyle(QtCore.Qt.DashLine)
+            painter.setPen(pen)
             painter.drawRect(rect)
             painter.drawText(rect.adjusted(4, 2, -2, -2),
-                             QtCore.Qt.AlignLeft | QtCore.Qt.AlignBottom, name)
+                             QtCore.Qt.AlignLeft | QtCore.Qt.AlignBottom, str(name))
 
 
 class UVGroupPackerWindow(QtWidgets.QDialog):
@@ -101,30 +119,67 @@ class UVGroupPackerWindow(QtWidgets.QDialog):
         self.setObjectName(WINDOW_OBJECT)
         self.setWindowTitle("UV Group Packer %s" % __version__)
         self.setWindowFlags(self.windowFlags() | QtCore.Qt.Tool)
-        self.resize(380, 720)
+        self.resize(400, 900)
         self._updating = False
+        self._boxes = {}
         self._build()
+        self._on_mode_changed()
         self.refresh()
 
     # ------------------------------------------------------------------ UI
     def _build(self):
-        layout = QtWidgets.QVBoxLayout(self)
+        outer = QtWidgets.QVBoxLayout(self)
+        scroll = QtWidgets.QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QtWidgets.QFrame.NoFrame)
+        body = QtWidgets.QWidget()
+        layout = QtWidgets.QVBoxLayout(body)
+        layout.setContentsMargins(0, 0, 0, 0)
+        scroll.setWidget(body)
+        outer.addWidget(scroll, 1)
 
+        layout.addWidget(self._build_groups())
+        layout.addWidget(self._build_packing())
+        layout.addWidget(self._build_group_box())
+        layout.addWidget(self._build_texel_density())
+
+        self.preview = BoxPreview()
+        layout.addWidget(self.preview)
+
+        buttons = QtWidgets.QHBoxLayout()
+        preview_btn = QtWidgets.QPushButton("Preview Boxes")
+        preview_btn.clicked.connect(self._preview)
+        pack_btn = QtWidgets.QPushButton("Pack")
+        pack_btn.setMinimumHeight(32)
+        pack_btn.setStyleSheet("font-weight: bold;")
+        pack_btn.clicked.connect(self._pack)
+        buttons.addWidget(preview_btn)
+        buttons.addWidget(pack_btn, 1)
+        outer.addLayout(buttons)
+
+        self.status = QtWidgets.QLabel("")
+        self.status.setWordWrap(True)
+        outer.addWidget(self.status)
+
+    def _build_groups(self):
         group_box = QtWidgets.QGroupBox("Groups")
         gl = QtWidgets.QVBoxLayout(group_box)
         self.tree = QtWidgets.QTreeWidget()
-        self.tree.setHeaderLabels(["", "Group", "Faces", "Weight", "Lock"])
+        self.tree.setHeaderLabels(["", "Group", "Faces", "Weight", "Lock", "TD"])
         self.tree.setRootIsDecorated(False)
         self.tree.setMinimumHeight(150)
         self.tree.setSelectionMode(QtWidgets.QAbstractItemView.ExtendedSelection)
         header = self.tree.header()
         header.setStretchLastSection(False)
         header.setSectionResizeMode(COL_NAME, QtWidgets.QHeaderView.Stretch)
-        for col, width in ((COL_COLOR, 26), (COL_FACES, 56), (COL_WEIGHT, 64), (COL_LOCK, 40)):
+        for col, width in ((COL_COLOR, 26), (COL_FACES, 52), (COL_WEIGHT, 56), (COL_LOCK, 36),
+                           (COL_TD, 52)):
             header.setSectionResizeMode(col, QtWidgets.QHeaderView.Fixed)
             self.tree.setColumnWidth(col, width)
         self.tree.setToolTip("Double-click the colour to change it, the name to rename,\n"
-                             "the weight to make a group's box bigger or smaller.")
+                             "the weight to make a group's box bigger or smaller.\n"
+                             "In the island modes the weight is a texel density multiplier "
+                             "(texel density tiers).")
         self.tree.itemChanged.connect(self._on_item_changed)
         self.tree.itemDoubleClicked.connect(self._on_item_double_clicked)
         self.tree.itemSelectionChanged.connect(self._on_tree_selection)
@@ -147,20 +202,32 @@ class UVGroupPackerWindow(QtWidgets.QDialog):
             row.addWidget(btn)
         gl.addLayout(row1)
         gl.addLayout(row2)
-        layout.addWidget(group_box, 1)
+        return group_box
 
+    def _build_packing(self):
         pack_box = QtWidgets.QGroupBox("Packing")
         form = QtWidgets.QFormLayout(pack_box)
+        self._form = form
+        self._rows = {}
+
         self.mode = QtWidgets.QComboBox()
         self.mode.addItem("Groups To Single Tile", packer.MODE_SINGLE_TILE)
         self.mode.addItem("Groups To Tiles (UDIM)", packer.MODE_TILES)
-        self.mode.currentIndexChanged.connect(self._preview)
+        self.mode.addItem("Groups To Texture Atlas", packer.MODE_ATLAS)
+        self.mode.addItem("Dynamic Tiles (islands)", packer.MODE_DYNAMIC)
+        self.mode.addItem("Tile Range (islands)", packer.MODE_TILE_RANGE)
+        self.mode.setToolTip(
+            "Group modes pack each group into its own box.\n"
+            "Island modes pack the selection (or every group, or the whole scene)\n"
+            "over several UDIM tiles at one texel density.")
+        self.mode.currentIndexChanged.connect(self._on_mode_changed)
         form.addRow("Mode", self.mode)
 
         self.resolution = QtWidgets.QComboBox()
         for res in (512, 1024, 2048, 4096, 8192):
             self.resolution.addItem(str(res), res)
         self.resolution.setCurrentIndex(2)
+        self.resolution.currentIndexChanged.connect(self._refresh_density)
         form.addRow("Texture size", self.resolution)
 
         self.padding = QtWidgets.QDoubleSpinBox()
@@ -174,7 +241,7 @@ class UVGroupPackerWindow(QtWidgets.QDialog):
         self.gap.setValue(8)
         self.gap.setSuffix(" px")
         self.gap.valueChanged.connect(self._preview)
-        form.addRow("Box gap", self.gap)
+        self._add_row("gap", "Box gap", self.gap)
 
         self.rotation = QtWidgets.QComboBox()
         self.rotation.addItem("90°", 90)
@@ -187,7 +254,7 @@ class UVGroupPackerWindow(QtWidgets.QDialog):
         self.area.addItem("Current UV area", packer.AREA_UV)
         self.area.setToolTip("What decides each group's box size in single tile mode")
         self.area.currentIndexChanged.connect(self._preview)
-        form.addRow("Box size from", self.area)
+        self._add_row("area", "Box size from", self.area)
 
         tile_row = QtWidgets.QHBoxLayout()
         self.tile_u = QtWidgets.QSpinBox()
@@ -197,31 +264,137 @@ class UVGroupPackerWindow(QtWidgets.QDialog):
             spin.setPrefix(prefix)
             spin.valueChanged.connect(self._preview)
             tile_row.addWidget(spin)
-        form.addRow("Start tile", tile_row)
+        tile_widget = QtWidgets.QWidget()
+        tile_row.setContentsMargins(0, 0, 0, 0)
+        tile_widget.setLayout(tile_row)
+        self._add_row("tile", "Start tile", tile_widget)
+
+        self.per_row = QtWidgets.QSpinBox()
+        self.per_row.setRange(1, 10)
+        self.per_row.setValue(4)
+        self.per_row.valueChanged.connect(self._preview)
+        self._add_row("per_row", "Tiles in row", self.per_row)
+
+        self.count = QtWidgets.QSpinBox()
+        self.count.setRange(1, 100)
+        self.count.setValue(4)
+        self.count.valueChanged.connect(self._preview)
+        self._add_row("count", "Tile count", self.count)
+
+        self.fill = QtWidgets.QComboBox()
+        self.fill.addItem("Simultaneously", uvlayout.FILL_SIMULTANEOUS)
+        self.fill.addItem("Sequentially", uvlayout.FILL_SEQUENTIAL)
+        self.fill.setToolTip("Simultaneously: every tile about equally full.\n"
+                             "Sequentially: fill the first tile, then the next.")
+        self._add_row("fill", "Tile filling", self.fill)
+
+        atlas_row = QtWidgets.QHBoxLayout()
+        atlas_row.setContentsMargins(0, 0, 0, 0)
+        self.atlas_x = QtWidgets.QSpinBox()
+        self.atlas_y = QtWidgets.QSpinBox()
+        for spin, prefix in ((self.atlas_x, "X "), (self.atlas_y, "Y ")):
+            spin.setRange(1, 16)
+            spin.setValue(3)
+            spin.setPrefix(prefix)
+            spin.valueChanged.connect(self._preview)
+            atlas_row.addWidget(spin)
+        atlas_widget = QtWidgets.QWidget()
+        atlas_widget.setLayout(atlas_row)
+        self._add_row("atlas", "Atlas size", atlas_widget)
+
+        self.cells = QtWidgets.QSpinBox()
+        self.cells.setRange(1, 64)
+        self.cells.setValue(1)
+        self.cells.setToolTip("Atlas cells each group gets")
+        self.cells.valueChanged.connect(self._preview)
+        self._add_row("cells", "Cells per group", self.cells)
 
         self.split = QtWidgets.QCheckBox("Split UV shells shared by two groups")
         self.split.setChecked(True)
         self.split.setToolTip("Cuts UV seams along group borders before packing")
         form.addRow(self.split)
-        layout.addWidget(pack_box)
+        return pack_box
 
-        self.preview = BoxPreview()
-        layout.addWidget(self.preview, 1)
+    def _build_group_box(self):
+        box = QtWidgets.QGroupBox("Group Box (highlighted group)")
+        vl = QtWidgets.QVBoxLayout(box)
+        self.use_box = QtWidgets.QCheckBox("Custom box: always pack this group here")
+        self.use_box.toggled.connect(self._on_box_edited)
+        vl.addWidget(self.use_box)
 
-        buttons = QtWidgets.QHBoxLayout()
-        preview_btn = QtWidgets.QPushButton("Preview Boxes")
-        preview_btn.clicked.connect(self._preview)
-        pack_btn = QtWidgets.QPushButton("Pack")
-        pack_btn.setMinimumHeight(32)
-        pack_btn.setStyleSheet("font-weight: bold;")
-        pack_btn.clicked.connect(self._pack)
-        buttons.addWidget(preview_btn)
-        buttons.addWidget(pack_btn, 1)
-        layout.addLayout(buttons)
+        coords = QtWidgets.QGridLayout()
+        self.box_spins = []
+        for index, label in enumerate(("U min", "V min", "U max", "V max")):
+            spin = QtWidgets.QDoubleSpinBox()
+            spin.setRange(-10, 100)
+            spin.setDecimals(3)
+            spin.setSingleStep(0.05)
+            spin.editingFinished.connect(self._on_box_edited)
+            coords.addWidget(QtWidgets.QLabel(label), index // 2, (index % 2) * 2)
+            coords.addWidget(spin, index // 2, (index % 2) * 2 + 1)
+            self.box_spins.append(spin)
+        vl.addLayout(coords)
 
-        self.status = QtWidgets.QLabel("")
-        self.status.setWordWrap(True)
-        layout.addWidget(self.status)
+        row = QtWidgets.QHBoxLayout()
+        from_layout = QtWidgets.QPushButton("From Layout")
+        from_layout.setToolTip("Start from the box the automatic layout gives this group")
+        from_layout.clicked.connect(self._box_from_layout)
+        to_tile = QtWidgets.QPushButton("Set To Tile")
+        to_tile.setToolTip("Make the box fill the whole tile it is in")
+        to_tile.clicked.connect(self._box_to_tile)
+        row.addWidget(from_layout)
+        row.addWidget(to_tile)
+        vl.addLayout(row)
+
+        move_row = QtWidgets.QHBoxLayout()
+        grid = QtWidgets.QGridLayout()
+        grid.setSpacing(2)
+        for r, names in enumerate(COMPASS):
+            for c, direction in enumerate(names):
+                if not direction:
+                    continue
+                btn = QtWidgets.QPushButton(direction)
+                btn.setFixedWidth(40)
+                btn.setToolTip("Move the box to the adjacent tile")
+                btn.clicked.connect(lambda checked=False, d=direction: self._move_box(d))
+                grid.addWidget(btn, r, c)
+        move_row.addLayout(grid)
+        self.move_islands = QtWidgets.QCheckBox("Move islands\nwith the box")
+        self.move_islands.setChecked(True)
+        move_row.addWidget(self.move_islands)
+        move_row.addStretch(1)
+        vl.addLayout(move_row)
+        return box
+
+    def _build_texel_density(self):
+        box = QtWidgets.QGroupBox("Texel Density")
+        form = QtWidgets.QFormLayout(box)
+        self.density = QtWidgets.QDoubleSpinBox()
+        self.density.setRange(0, 100000)
+        self.density.setDecimals(2)
+        self.density.setSuffix(" px/unit")
+        self.density.setSpecialValueText("current (keep)")
+        self.density.setToolTip("Pixels per scene unit at the texture size.\n"
+                                "Dynamic Tiles packs at this density; 0 keeps the current one.")
+        form.addRow("Density", self.density)
+        row = QtWidgets.QHBoxLayout()
+        for label, slot, tip in (
+                ("Get", self._get_density, "Read the average density of the selection"),
+                ("Set Per-Island", self._set_density,
+                 "Scale every selected island to this density (times its group weight)")):
+            btn = QtWidgets.QPushButton(label)
+            btn.setToolTip(tip)
+            btn.clicked.connect(slot)
+            row.addWidget(btn)
+        form.addRow(row)
+        self.show_td = QtWidgets.QCheckBox("Show each group's density in the list")
+        self.show_td.toggled.connect(self.refresh)
+        form.addRow(self.show_td)
+        return box
+
+    def _add_row(self, key, label, widget):
+        self._form.addRow(label, widget)
+        self._rows[key] = (self._form.labelForField(widget), widget)
 
     # -------------------------------------------------------------- helpers
     def options(self):
@@ -234,6 +407,13 @@ class UVGroupPackerWindow(QtWidgets.QDialog):
             area_source=self.area.currentData(),
             tile_u=self.tile_u.value(),
             tile_v=self.tile_v.value(),
+            tiles_per_row=self.per_row.value(),
+            tile_count=self.count.value(),
+            fill_method=self.fill.currentData(),
+            texel_density=self.density.value(),
+            atlas_cols=self.atlas_x.value(),
+            atlas_rows=self.atlas_y.value(),
+            cells_per_group=self.cells.value(),
             split_shared_shells=self.split.isChecked())
 
     def _selected_names(self):
@@ -246,38 +426,64 @@ class UVGroupPackerWindow(QtWidgets.QDialog):
             return None
         return names[0]
 
+    def _group(self, name):
+        return next((g for g in uvgroups.list_groups() if g["name"] == name), None)
+
     def _message(self, text):
         self.status.setText(text)
 
-    def refresh(self):
+    def refresh(self, *args):
         selected = set(self._selected_names())
+        show_td = self.show_td.isChecked()
+        self.tree.setColumnHidden(COL_TD, not show_td)
+        res = self.resolution.currentData()
         self._updating = True
         self.tree.clear()
         for g in uvgroups.list_groups():
             item = QtWidgets.QTreeWidgetItem()
             item.setIcon(COL_COLOR, _swatch(g["color"]))
-            item.setText(COL_NAME, g["name"])
+            item.setText(COL_NAME, g["name"] + ("  [box]" if g["box"] else ""))
             item.setData(COL_NAME, QtCore.Qt.UserRole, g["name"])
             item.setText(COL_FACES, str(g["count"]))
             item.setText(COL_WEIGHT, "%.2f" % g["weight"])
             item.setCheckState(COL_LOCK, QtCore.Qt.Checked if g["locked"] else QtCore.Qt.Unchecked)
+            if show_td and g["faces"]:
+                item.setText(COL_TD, "%.1f" % uvislands.faces_density(g["faces"], res))
             item.setFlags(item.flags() | QtCore.Qt.ItemIsEditable | QtCore.Qt.ItemIsUserCheckable)
             self.tree.addTopLevelItem(item)
             item.setSelected(g["name"] in selected)
         self._updating = False
+        self._load_box_fields()
         self._preview()
 
+    def _refresh_density(self, *args):
+        if self.show_td.isChecked():
+            self.refresh()
+
     # -------------------------------------------------------------- slots
+    def _on_mode_changed(self, *args):
+        visible = MODE_ROWS.get(self.mode.currentData(), ())
+        for key, (label, widget) in self._rows.items():
+            label.setVisible(key in visible)
+            widget.setVisible(key in visible)
+        self._preview()
+
     def _on_item_double_clicked(self, item, column):
         name = item.data(COL_NAME, QtCore.Qt.UserRole)
         if column == COL_COLOR:
-            g = next((g for g in uvgroups.list_groups() if g["name"] == name), None)
+            g = self._group(name)
             color = QtWidgets.QColorDialog.getColor(_qcolor(g["color"]) if g else QtGui.QColor(),
                                                     self, "Group colour")
             if color.isValid():
                 uvgroups.set_color(name, (color.redF(), color.greenF(), color.blueF()))
                 self.refresh()
-        elif column in (COL_NAME, COL_WEIGHT):
+        elif column == COL_NAME:
+            # Edit the plain name, not the "[box]" marker.
+            self._updating = True
+            item.setText(COL_NAME, name)
+            self._updating = False
+            self.tree.editItem(item, column)
+        elif column == COL_WEIGHT:
             self.tree.editItem(item, column)
 
     def _on_item_changed(self, item, column):
@@ -301,6 +507,7 @@ class UVGroupPackerWindow(QtWidgets.QDialog):
             cmds.select(clear=True)
             for name in names:
                 uvgroups.select_group(name, add=True)
+        self._load_box_fields()
 
     def _new_group(self):
         faces = uvgroups.selected_faces()
@@ -341,26 +548,135 @@ class UVGroupPackerWindow(QtWidgets.QDialog):
         self._message("Groups from materials: %s" % (", ".join(created) or "none found"))
         self.refresh()
 
-    def _preview(self, *args):
+    # ------------------------------------------------------------ group box
+    def _load_box_fields(self):
+        names = self._selected_names()
+        g = self._group(names[0]) if names else None
+        box = (g["box"] if g else None) or self._boxes.get(names[0] if names else None)
+        widgets = [self.use_box] + self.box_spins
+        for w in widgets:
+            w.blockSignals(True)
+        self.use_box.setChecked(bool(g and g["box"]))
+        for spin, value in zip(self.box_spins, box or (0.0, 0.0, 1.0, 1.0)):
+            spin.setValue(value)
+        for w in widgets:
+            w.blockSignals(False)
+            w.setEnabled(g is not None)
+
+    def _box_fields(self):
+        return tuple(spin.value() for spin in self.box_spins)
+
+    def _write_box(self, box):
+        name = self._current_name()
+        if not name:
+            return
+        for spin, value in zip(self.box_spins, box):
+            spin.blockSignals(True)
+            spin.setValue(value)
+            spin.blockSignals(False)
+        self.use_box.blockSignals(True)
+        self.use_box.setChecked(True)
+        self.use_box.blockSignals(False)
+        uvgroups.set_box(name, box)
+        self.refresh()
+
+    def _on_box_edited(self, *args):
+        name = self._current_name()
+        if not name:
+            return
+        box = self._box_fields()
+        if self.use_box.isChecked() and (box[2] <= box[0] or box[3] <= box[1]):
+            self._message("The box needs U max > U min and V max > V min.")
+            return
+        uvgroups.set_box(name, box if self.use_box.isChecked() else None)
+        self.refresh()
+
+    def _box_from_layout(self):
+        name = self._current_name()
+        if not name:
+            return
+        g = self._group(name)
+        others = [x for x in uvgroups.list_groups()
+                  if x["faces"] and not x["locked"] and x["name"] != name and not x["box"]]
+        boxes = packer.compute_group_boxes(others + [dict(g, box=None)], self.options())
+        if name in boxes:
+            self._write_box(boxes[name])
+
+    def _box_to_tile(self):
+        u0, v0 = self._box_fields()[:2]
+        u, v = int(u0 // 1), int(v0 // 1)
+        self._write_box((u, v, u + 1.0, v + 1.0))
+
+    def _move_box(self, direction):
+        name = self._current_name()
+        if not name:
+            return
+        du, dv = uvlayout.DIRECTIONS[direction]
+        if self.move_islands.isChecked():
+            faces = uvgroups.group_faces(name)
+            uvs = cmds.polyListComponentConversion(faces, toUV=True) if faces else []
+            if uvs:
+                cmds.polyEditUV(uvs, uValue=du, vValue=dv, relative=True)
+        self._write_box(uvlayout.move_box(self._box_fields(), direction))
+        self._message("Moved '%s' box %s." % (name, direction))
+
+    # -------------------------------------------------------- texel density
+    def _get_density(self):
+        faces = uvgroups.selected_faces()
+        if not faces:
+            self._message("Select faces or objects first.")
+            return
+        value = uvislands.faces_density(faces, self.resolution.currentData())
+        self.density.setValue(value)
+        self._message("Average texel density of the selection: %.2f px/unit." % value)
+
+    def _set_density(self):
+        faces = uvgroups.selected_faces()
+        if not faces or not self.density.value():
+            self._message("Select faces or objects and enter a density first.")
+            return
+        cmds.undoInfo(openChunk=True, chunkName="UVGroupPacker TD")
         try:
+            count = uvislands.set_density(uvislands.shells(faces), self.density.value(),
+                                          self.resolution.currentData(), use_weight=False)
+        finally:
+            cmds.undoInfo(closeChunk=True)
+        self._message("Set %d island(s) to %.2f px/unit." % (count, self.density.value()))
+        self.refresh()
+
+    # ---------------------------------------------------------------- pack
+    def _preview(self, *args):
+        options = self.options()
+        try:
+            if options.mode in packer.ISLAND_MODES:
+                tiles = packer.estimate_tile_boxes(options)
+                boxes = {1001 + int(b[0]) + 10 * int(b[1]): b for b in tiles}
+                self.preview.set_boxes(boxes, {})
+                return
             group_list = [g for g in uvgroups.list_groups() if g["faces"] and not g["locked"]]
-            boxes = packer.compute_group_boxes(group_list, self.options())
+            boxes = packer.compute_group_boxes(group_list, options)
         except Exception as exc:  # keep the window usable if the scene is odd
             self._message("Preview failed: %s" % exc)
             return
-        self.preview.set_boxes(boxes, {g["name"]: g["color"] for g in group_list})
+        self._boxes = boxes
+        self.preview.set_boxes(boxes, {g["name"]: g["color"] for g in group_list},
+                               custom=[g["name"] for g in group_list if g["box"]])
 
     def _pack(self):
         options = self.options()
         try:
-            boxes = packer.pack_groups(options)
+            boxes = packer.pack(options)
         except Exception as exc:
             self._message("Pack failed: %s" % exc)
             raise
         if not boxes:
-            self._message("Nothing to pack: create groups (or unlock them) first.")
+            self._message("Nothing to pack: create groups (or unlock them), or select islands.")
             return
-        self._message("Packed %d group(s). Ctrl+Z undoes the whole pack." % len(boxes))
+        if options.mode in packer.ISLAND_MODES:
+            self._message("Packed into %d tile(s): %s. Ctrl+Z undoes the whole pack."
+                          % (len(boxes), ", ".join(str(t) for t in sorted(boxes))))
+        else:
+            self._message("Packed %d group(s). Ctrl+Z undoes the whole pack." % len(boxes))
         self.refresh()
 
 

@@ -61,5 +61,62 @@ class FitTransformTest(unittest.TestCase):
         self.assertAlmostEqual((new[1] + new[3]) / 2, 0.75)
 
 
+class TileTest(unittest.TestCase):
+    def test_tile_boxes_wrap_rows(self):
+        boxes = layout.tile_boxes(5, start_u=1, start_v=0, per_row=2)
+        self.assertEqual([b[:2] for b in boxes], [(1, 0), (2, 0), (1, 1), (2, 1), (1, 2)])
+
+    def test_move_box(self):
+        self.assertEqual(layout.move_box((0.1, 0.2, 0.5, 0.6), "NE"), (1.1, 1.2, 1.5, 1.6))
+        self.assertEqual(layout.move_box((1, 1, 2, 2), "SW"), (0, 0, 1, 1))
+
+    def test_tiles_needed(self):
+        self.assertEqual(layout.tiles_needed(0.0), 1)
+        self.assertEqual(layout.tiles_needed(1.4, fill_ratio=0.7), 2)
+        self.assertEqual(layout.tiles_needed(1.5, fill_ratio=0.7), 3)
+
+
+class DistributeTest(unittest.TestCase):
+    items = [("a", 4.0), ("b", 3.0), ("c", 2.0), ("d", 2.0), ("e", 1.0)]
+
+    def test_simultaneous_balances(self):
+        bins = layout.distribute(self.items, 2)
+        sums = [sum(dict(self.items)[k] for k in b) for b in bins]
+        self.assertEqual(sorted(sums), [6.0, 6.0])
+
+    def test_sequential_fills_first_tile(self):
+        bins = layout.distribute(self.items, 3, layout.FILL_SEQUENTIAL, capacity=6.0)
+        self.assertEqual(bins[0], ["a", "c"])
+        self.assertEqual(sorted(k for b in bins for k in b), list("abcde"))
+
+    def test_every_item_placed_once(self):
+        bins = layout.distribute(self.items, 4, layout.FILL_SEQUENTIAL)
+        self.assertEqual(sorted(k for b in bins for k in b), list("abcde"))
+
+
+class AtlasTest(unittest.TestCase):
+    def test_grid_cells_from_top_left(self):
+        boxes = layout.atlas_boxes(["a", "b", "c", "d"], 3, 3)
+        for got, want in zip(boxes["a"], (0.0, 2 / 3.0, 1 / 3.0, 1.0)):
+            self.assertAlmostEqual(got, want)
+        self.assertAlmostEqual(boxes["d"][0], 0.0)
+        self.assertAlmostEqual(boxes["d"][3], 2 / 3.0)
+
+    def test_two_cells_per_group_no_overlap(self):
+        boxes = layout.atlas_boxes(list("abcde"), 3, 3, cells_per_group=2)
+        # 3 columns fit one 2-wide block per row, so only 3 groups fit.
+        self.assertEqual(sorted(boxes), ["a", "b", "c"])
+        self.assertAlmostEqual(area(boxes["a"]), 2 / 9.0)
+        for a, b in itertools.combinations(boxes.values(), 2):
+            self.assertFalse(overlaps(a, b))
+
+    def test_block_taller_than_one_row(self):
+        boxes = layout.atlas_boxes(["a", "b"], 2, 4, cells_per_group=3, tile=(1, 0, 2, 1), gap=0.02)
+        self.assertEqual(set(boxes), {"a", "b"})
+        for b in boxes.values():
+            self.assertTrue(layout.contains((1, 0, 2, 1), b))
+            self.assertAlmostEqual(b[3] - b[1], 0.5 - 0.02)
+
+
 if __name__ == "__main__":
     unittest.main()

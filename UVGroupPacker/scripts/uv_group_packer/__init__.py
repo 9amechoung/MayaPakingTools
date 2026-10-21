@@ -4,7 +4,7 @@ Usage in Maya:
     import uv_group_packer
     uv_group_packer.show()
 """
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 
 def show():
